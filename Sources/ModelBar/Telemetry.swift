@@ -52,7 +52,7 @@ struct BackendStatus: Sendable, Equatable {
 }
 
 enum TelemetryKind: String, Sendable {
-    case ds4, llamacpp, ollama, comfyui, none
+    case ds4, llamacpp, ollama, comfyui, localai, none
 }
 
 /// All backend HTTP probing. Every call has a short timeout so a wedged server
@@ -136,6 +136,14 @@ enum Probe {
             }
         case .comfyui:
             telemetry = await comfyTelemetry(backend: backend, statsPath: telemetryPath)
+        case .localai:
+            // LocalAI's own /metrics is HTTP request-latency histograms, not
+            // per-model decode tok/s — genuinely thinner than ds4/llama.cpp,
+            // verified rather than assumed (checked the real output). No live
+            // throughput figure is synthesised; only served-model identity via
+            // /v1/models is shown, which is what the fallback below already
+            // does for any backend with modelsPath set.
+            break
         case .none:
             break
         }
