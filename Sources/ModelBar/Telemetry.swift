@@ -26,6 +26,9 @@ struct Telemetry: Sendable, Equatable {
     var promptTokens: Int?
     var generatedTokens: Int?
     var ollamaResident: [OllamaResident] = []
+    /// Names a multi-model backend reports as resident, where it gives us names
+    /// but no per-model size (LocalAI). Sorted, so the UI never flickers.
+    var residentModels: [String] = []
     var jobsRunning: Int?
     var jobsPending: Int?
     var extra: [KV] = []
@@ -37,7 +40,8 @@ struct Telemetry: Sendable, Equatable {
 
     var isEmpty: Bool {
         decodeTPS == nil && prefillTPS == nil && contextUsed == nil
-            && ollamaResident.isEmpty && jobsRunning == nil && extra.isEmpty
+            && ollamaResident.isEmpty && residentModels.isEmpty
+            && jobsRunning == nil && extra.isEmpty
     }
 }
 
@@ -49,6 +53,22 @@ struct BackendStatus: Sendable, Equatable {
     var telemetry: Telemetry
     var lastError: String?
     var checkedAt: Date
+
+    /// The names a backend reports as *actually resident right now*, or `nil`
+    /// when the backend has no way to tell us.
+    ///
+    /// This distinction is the whole point: for a multi-model server that stays
+    /// up across loads and unloads (LocalAI, Ollama), "the port answers" and
+    /// "this model is in memory" are completely different facts, and an
+    /// OpenAI-style `/v1/models` listing answers neither — it lists what is
+    /// *configured*. LocalAI returns all three of its YAML entries whether or
+    /// not any weights are resident, which is what previously made an unloaded
+    /// Muse-Glimmer report as loaded.
+    ///
+    /// `nil` and `[]` mean opposite things and must not be conflated:
+    ///   nil — no residency signal exists; fall back to weaker heuristics.
+    ///   []  — the backend affirmatively says nothing is loaded. Authoritative.
+    var residentModelIDs: [String]?
 }
 
 enum TelemetryKind: String, Sendable {
@@ -104,7 +124,7 @@ enum Probe {
         guard plainUp else {
             return BackendStatus(backendId: backend.id, up: false, servedModel: nil,
                                  uptime: nil, telemetry: Telemetry(),
-                                 lastError: nil, checkedAt: Date())
+                                 lastError: nil, checkedAt: Date(), residentModelIDs: nil)
         }
 
         var servedModel: String?
@@ -115,6 +135,9 @@ enum Probe {
         }
 
         var telemetry = Telemetry()
+        /// Authoritative residency, when the backend can report it. See
+        /// `BackendStatus.residentModelIDs` for why nil != [].
+        var residentModelIDs: [String]?
         switch kind {
         case .ds4:
             if let path = telemetryPath, let url = backend.url(path),
@@ -127,36 +150,92 @@ enum Probe {
             telemetry = t
             if servedModel == nil { servedModel = model }
         case .ollama:
+            // /api/ps is the *loaded* set. Ollama's /api/tags — the listing it
+            // is easy to reach for — is the *installed* set and would be the
+            // same category error as LocalAI's /v1/models. Deliberately not used.
             if let path = telemetryPath, let url = backend.url(path),
                let ps = await getJSON(url) {
                 telemetry = ollamaTelemetry(ps)
-                if servedModel == nil {
-                    servedModel = telemetry.ollamaResident.first?.name
-                }
+                residentModelIDs = telemetry.ollamaResident.map(\.name).sorted()
+                if servedModel == nil { servedModel = residentModelIDs?.first }
             }
         case .comfyui:
             telemetry = await comfyTelemetry(backend: backend, statsPath: telemetryPath)
         case .localai:
             // LocalAI's own /metrics is HTTP request-latency histograms, not
             // per-model decode tok/s — genuinely thinner than ds4/llama.cpp,
-            // verified rather than assumed (checked the real output). No live
-            // throughput figure is synthesised; only served-model identity via
-            // /v1/models is shown, which is what the fallback below already
-            // does for any backend with modelsPath set.
-            break
+            // verified rather than assumed (checked the real output).
+            //
+            // /system is the load-state source. Its `loaded_models[]` is the
+            // set actually resident; the sibling `backends[]` key is the list
+            // of *installed* backend runtimes and has nothing to do with load
+            // state — conflating the two is an easy and wrong shortcut.
+            //
+            // /backend/monitor?model=<name> was evaluated for richer per-model
+            // telemetry and rejected: against a genuinely loaded model it
+            // returns 500 "rpc error: code = Unimplemented", so there is no
+            // per-model detail to be had. Observed live, not assumed.
+            let system = await localaiSystem(backend: backend)
+            residentModelIDs = system.loaded
+            telemetry.residentModels = system.loaded
+            if !system.loaded.isEmpty {
+                telemetry.extra.append(KV(key: "loaded",
+                                          value: system.loaded.joined(separator: ", ")))
+            }
+            // Deterministic: the first *loaded* model, not the first configured
+            // one. LocalAI serialises /v1/models from a Go map, so its order is
+            // randomised per request — taking `data[0]` there made the menu
+            // alternate between model names on consecutive polls even though
+            // nothing had changed.
+            servedModel = system.loaded.first
         case .none:
             break
         }
 
-        // Fall back to an OpenAI-style model listing when /health carries no name.
-        if servedModel == nil, let path = backend.modelsPath, let url = backend.url(path),
+        // Fall back to an OpenAI-style model listing when /health carries no
+        // name — but only for a backend with no residency signal of its own.
+        // For LocalAI/Ollama this listing is "configured", not "loaded", and
+        // letting it populate servedModel is precisely the bug being fixed.
+        if servedModel == nil, residentModelIDs == nil,
+           let path = backend.modelsPath, let url = backend.url(path),
            let json = await getJSON(url) {
             servedModel = openAIModelName(json)
         }
 
         return BackendStatus(backendId: backend.id, up: true, servedModel: servedModel,
                              uptime: uptime, telemetry: telemetry,
-                             lastError: nil, checkedAt: Date())
+                             lastError: nil, checkedAt: Date(),
+                             residentModelIDs: residentModelIDs)
+    }
+
+    /// LocalAI `GET /system`. Verified shape, observed live with a model
+    /// genuinely resident:
+    ///
+    ///     {"backends":["llama-cpp","metal-mlx", …],
+    ///      "loaded_models":[{"id":"muse-glimmer","backend":"llama-cpp"}]}
+    ///
+    /// `id` is the model name from `~/.localai/models/<name>.yaml`. Entries are
+    /// tolerated as bare strings too, so a future LocalAI that flattens the
+    /// array does not silently read as "nothing loaded".
+    static func localaiSystem(backend: BackendSpec) async -> (loaded: [String],
+                                                              backends: [String]) {
+        guard let url = backend.url("/system"), let json = await getJSON(url) else {
+            // Unreachable /system is genuinely unknown, not "nothing loaded" —
+            // reported as an empty pair only because the caller has already
+            // established the port answers; see the call site.
+            return ([], [])
+        }
+        var loaded: [String] = []
+        if let entries = json["loaded_models"] as? [Any] {
+            for entry in entries {
+                if let s = entry as? String { loaded.append(s) }
+                else if let d = entry as? [String: Any], let id = stringValue(d["id"]) {
+                    loaded.append(id)
+                }
+            }
+        }
+        let backends = (json["backends"] as? [Any])?.compactMap { $0 as? String } ?? []
+        return (loaded.sorted(), backends)
     }
 
     // MARK: - Per-backend parsers
@@ -314,13 +393,23 @@ enum Probe {
 
     /// Accepts both OpenAI (`data[].id`) and Ollama-flavoured (`models[].name`)
     /// listings — llama.cpp build 10470 returns both keys in one response.
+    ///
+    /// Only ever called for single-model servers now (llama.cpp, MLX), where
+    /// the listing has exactly one entry and "listed" really does mean
+    /// "loaded". It sorts before picking anyway: a server that serialises this
+    /// array from a hash map returns a different order per request, and taking
+    /// an arbitrary element made the UI alternate between names on consecutive
+    /// polls with nothing actually changing.
     static func openAIModelName(_ json: [String: Any]) -> String? {
-        if let data = json["data"] as? [[String: Any]], let first = data.first,
-           let id = stringValue(first["id"]) {
-            return id
+        if let data = json["data"] as? [[String: Any]] {
+            let ids = data.compactMap { stringValue($0["id"]) }.sorted()
+            if let first = ids.first { return first }
         }
-        if let models = json["models"] as? [[String: Any]], let first = models.first {
-            return stringValue(first["name"]) ?? stringValue(first["model"])
+        if let models = json["models"] as? [[String: Any]] {
+            let names = models.compactMap {
+                stringValue($0["name"]) ?? stringValue($0["model"])
+            }.sorted()
+            if let first = names.first { return first }
         }
         return nil
     }

@@ -87,8 +87,8 @@ enum HarnessControl {
 
         do {
             let data = try JSONSerialization.data(
-                withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-            try writeAtomically(data: data, to: path)
+                withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try writeAtomically(data: HarnessRegistrar.newlineTerminated(data), to: path)
             return nil
         } catch {
             return "pi settings: \(error.localizedDescription)"
@@ -184,8 +184,14 @@ enum HarnessControl {
         let dir = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
+        // Backup as a DOTFILE beside the original, not `<name>.modelbar.bak`.
+        // Some of these files live in directories a backend scans for its own
+        // configs (~/models is LocalAI's --models-path), and a visible sibling
+        // there can be picked up as a bogus model entry. A leading dot keeps
+        // the safety net without polluting the scan.
         if let existing = FileManager.default.contents(atPath: path) {
-            try? existing.write(to: URL(fileURLWithPath: path + ".modelbar.bak"))
+            let name = "." + url.lastPathComponent + ".modelbar.bak"
+            try? existing.write(to: dir.appendingPathComponent(name))
         }
         let tmp = dir.appendingPathComponent(".modelbar-\(UUID().uuidString).tmp")
         try data.write(to: tmp)

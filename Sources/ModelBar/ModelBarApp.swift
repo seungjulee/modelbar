@@ -157,7 +157,6 @@ struct ModelBarApp: App {
                 .onAppear {
                     state.menuOpen = true
                     Task { await state.refreshHarness() }
-                    Task { await state.refreshDiscovery() }
                 }
                 .onDisappear { state.menuOpen = false }
         } label: {
@@ -228,8 +227,6 @@ struct MenuContentView: View {
                        aiFootprint: state.procs.reduce(0) { $0 &+ $1.footprintBytes })
 
             modelsSection
-
-            if !state.discovered.isEmpty { discoverySection }
 
             BackendStripView(backends: state.backends, statuses: state.statuses,
                              hasProbed: state.hasProbed)
@@ -390,34 +387,18 @@ struct MenuContentView: View {
         }
     }
 
-    /// Detection, not configuration: something found on disk or in a
-    /// backend's own inventory with no manifest entry pointing at it yet.
-    /// Never auto-added, never auto-launched — guessing serve flags wrong is
-    /// worse than not guessing at all (this whole build was hand-tuning
-    /// mmproj paths, drafter flags, and context sizing per model).
-    private var discoverySection: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            SectionHeader(title: "NEW — NOT YET CONFIGURED",
-                          trailing: "\(state.discovered.count)")
-            ForEach(state.discovered) { item in
-                HStack(spacing: 7) {
-                    Image(systemName: "sparkle").font(.system(size: 9)).foregroundStyle(.blue)
-                    Text(item.name)
-                        .font(.system(size: 10, weight: .medium))
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 4)
-                    Text(item.detail)
-                        .font(.system(size: 9)).foregroundStyle(.secondary)
-                    if item.sizeBytes > 0 {
-                        Text(Fmt.bytes(item.sizeBytes))
-                            .font(.system(size: 9)).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            Text("add a models[] entry in the manifest to serve one of these")
-                .font(.system(size: 9)).foregroundStyle(.secondary)
-        }
-    }
+    // The "NEW — NOT YET CONFIGURED" section that used to sit here has been
+    // removed. It scanned disk and backend inventories for anything without a
+    // manifest entry, which in practice meant a permanent list of things the
+    // user had deliberately not configured (LTX-2.5, MiniMax Music-3, DFlash2
+    // artifacts) in a menu that is already dense. `ModelDiscovery` itself is
+    // kept and still reachable as `--cli discover`, since reconciling the
+    // manifest against disk is a reasonable thing to ask for on demand — it is
+    // only the always-on display and its per-poll I/O that are gone.
+    //
+    // Note this is not the same as the manifest *validation* warnings, which
+    // stay: those fire when a configured model's files have gone missing, and
+    // that catches real breakage rather than listing roads not taken.
 
     /// Each harness gets a picker listing exactly the models eligible for it
     /// (populated by the manifest, verified against what each backend's wire
@@ -442,8 +423,14 @@ struct MenuContentView: View {
         state.models.first { $0.harness?.codexProfile == profile }?.displayName ?? profile
     }
 
+    /// The picker lists *every* manifest model, not just the ones already
+    /// written into that harness's config — selecting one registers it there.
+    /// Models the harness cannot drive stay visible but disabled, with the
+    /// reason attached: an option that silently vanishes reads as a bug, while
+    /// "MLX does not serve /v1/responses" is a fact the user can act on.
     private func harnessRow(_ kind: AppState.HarnessKind, current: String) -> some View {
-        let eligible = state.eligibleModels(for: kind)
+        let options = state.harnessOptions(for: kind)
+        let anyEligible = options.contains { $0.eligible }
         return HStack(spacing: 7) {
             Text(kind.displayName)
                 .font(.system(size: 10, weight: .medium))
@@ -453,13 +440,16 @@ struct MenuContentView: View {
                 .lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 0)
             Menu {
-                if eligible.isEmpty {
-                    Text("no eligible models in manifest")
+                if options.isEmpty {
+                    Text("no models in manifest")
                 } else {
-                    ForEach(eligible) { model in
-                        Button(model.displayName) {
-                            Task { await state.pointHarness(kind, at: model) }
+                    ForEach(options) { option in
+                        Button(option.eligible
+                               ? option.model.displayName
+                               : "\(option.model.displayName) — \(option.reason ?? "unavailable")") {
+                            Task { await state.pointHarness(kind, at: option.model) }
                         }
+                        .disabled(!option.eligible)
                     }
                     if kind.hasAPIOption {
                         Divider()
@@ -474,7 +464,7 @@ struct MenuContentView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .disabled(eligible.isEmpty)
+            .disabled(!anyEligible && !kind.hasAPIOption)
         }
     }
 
@@ -513,8 +503,10 @@ struct ModelRowView: View {
                     } else if available {
                         Image(systemName: "circle").foregroundStyle(.secondary.opacity(0.4))
                     } else {
-                        Image(systemName: "arrow.down.circle.dotted")
-                            .foregroundStyle(.secondary.opacity(0.5))
+                        // Not a download-in-progress glyph, for the same reason
+                        // the label no longer says "downloading".
+                        Image(systemName: "exclamationmark.circle")
+                            .foregroundStyle(.orange.opacity(0.8))
                     }
                 }
                 .font(.system(size: 11))
@@ -539,8 +531,15 @@ struct ModelRowView: View {
             }
 
             if !available {
-                Text("     downloading — \(missing.count) file(s) not on disk yet")
+                // "downloading" was a guess about *why* a file was absent, and
+                // usually the wrong one: the real causes seen here have been a
+                // moved script and a backend re-pointed at a new models
+                // directory, neither of which involves a download. State the
+                // fact — a required file is missing — and name it, so the row
+                // is diagnosable without opening the manifest.
+                Text("     missing \(missingSummary)")
                     .font(.system(size: 9)).foregroundStyle(.orange)
+                    .lineLimit(1).truncationMode(.middle)
             } else if hovering {
                 HStack(spacing: 12) {
                     Button(loaded ? "Restart" : "Load", action: onLoad)
@@ -568,7 +567,17 @@ struct ModelRowView: View {
         .onHover { hovering = $0 }
         .onTapGesture { if available && !activity.isBusy { onLoad() } }
         .help(available ? (model.notes ?? model.displayName)
-              : "Not on disk yet:\n" + missing.joined(separator: "\n"))
+              : "Required file(s) not found:\n" + missing.joined(separator: "\n"))
+    }
+
+    /// Names the missing file when there is one, counts them when there are
+    /// several. Paths are shown expanded — a tilde in the manifest is not what
+    /// the check actually tested, and printing it back would send someone
+    /// looking in the wrong place.
+    private var missingSummary: String {
+        guard let first = missing.first else { return "file" }
+        let name = (first as NSString).lastPathComponent
+        return missing.count == 1 ? name : "\(name) +\(missing.count - 1) more"
     }
 
     /// Context picker: restart-to-apply, so it never touches a running

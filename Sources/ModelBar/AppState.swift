@@ -156,6 +156,20 @@ final class AppState {
         guard let ctx = model.context, ctx.options.contains(size) else { return }
         contextSelection[model.id] = size
         UserDefaults.standard.set(contextSelection, forKey: Self.contextSelectionKey)
+
+        // A launch-flag size is applied by `effectiveStart` at spawn time, so
+        // remembering it is enough. A file-backed size has to be written now:
+        // ModelBar never launches that backend, so there is no later moment at
+        // which the choice would otherwise take effect.
+        if ctx.isFileBacked {
+            if let error = ContextFile.write(size: size, option: ctx) {
+                note(error)
+                return
+            }
+            note("\(model.displayName) context set to \(size.formatted()) — "
+                 + "applies next time the backend loads this model")
+            return
+        }
         note("\(model.displayName) context set to \(size.formatted()) — applies on next load")
     }
 
@@ -275,8 +289,14 @@ final class AppState {
     }
 
     /// Decides which manifest models are currently loaded, in priority order:
-    /// an explicit `loadedCheck`, then a served-name match, then the port
-    /// bookkeeping from the last start we performed.
+    /// an explicit `loadedCheck`, then the backend's own authoritative
+    /// residency list, then a served-name match, then the port bookkeeping
+    /// from the last start we performed.
+    ///
+    /// The residency step exists because for a multi-model server that stays up
+    /// across loads (LocalAI, Ollama) every weaker signal below it is wrong:
+    /// the port answering proves only that the server is running, and its model
+    /// *listing* enumerates what is configured, not what is in memory.
     private func computeLoadedModels() async -> Set<String> {
         var loaded = Set<String>()
 
@@ -289,6 +309,24 @@ final class AppState {
                    text.localizedCaseInsensitiveContains(check.contains) {
                     loaded.insert(model.id)
                 }
+                continue
+            }
+
+            // Authoritative residency. Matched strictly and case-insensitively
+            // against the *whole* name the backend reports — never a substring
+            // test. Substring matching is what let one loaded model light up
+            // sibling entries: "qwen38-obliterated" contains "qwen38", and the
+            // manifest ids ("localai-muse-glimmer") are deliberately not the
+            // names LocalAI knows ("muse-glimmer"), so `servedName` is the only
+            // correct field to compare.
+            if let resident = status.residentModelIDs {
+                if let want = model.servedName, !want.isEmpty,
+                   resident.contains(where: { $0.caseInsensitiveCompare(want) == .orderedSame }) {
+                    loaded.insert(model.id)
+                }
+                // Authoritative means authoritative: absent from the list is a
+                // positive statement that this model is NOT loaded, so no
+                // fallback to weaker signals below.
                 continue
             }
 
@@ -334,9 +372,31 @@ final class AppState {
             let attributed = models.contains {
                 $0.backendId == backend.id && loadedModelIds.contains($0.id)
             }
-            if !attributed { total += backend.estimatedGB }
+            if !attributed { total += unattributedChargeGB(for: backend) }
         }
         return total
+    }
+
+    /// What to charge a backend that is up with nothing attributable loaded.
+    ///
+    /// For `.nominal` this is the declared size, which is correct for a server
+    /// whose weights are mmapped and therefore invisible to RSS. For
+    /// `.measured` it is the process's real footprint, because that backend
+    /// allocates anonymously and stays up while idle — ComfyUI sits at ~1 GB
+    /// with no pipeline resident, and charging its ~62 GB nominal size for
+    /// merely being reachable was consuming half the budget for memory nothing
+    /// had actually taken. Capped at the nominal figure so a mid-generation
+    /// spike cannot read as more than the pipeline's known size.
+    private func unattributedChargeGB(for backend: BackendSpec) -> Double {
+        guard backend.memoryAccounting == .measured else { return backend.estimatedGB }
+        guard let label = backend.matcher?.label else { return backend.estimatedGB }
+        let bytes = procs.filter { $0.label == label }
+                         .reduce(UInt64(0)) { $0 &+ $1.footprintBytes }
+        // No sample yet (first refresh, or the process matcher found nothing)
+        // is not evidence of zero — fall back to nominal rather than silently
+        // freeing up budget that may well be in use.
+        guard bytes > 0 else { return backend.estimatedGB }
+        return min(backend.estimatedGB, Double(bytes) / 1_073_741_824)
     }
 
     var budgetGB: Double { settings.memoryBudgetGB }
@@ -361,7 +421,14 @@ final class AppState {
             let attributed = models.contains {
                 $0.backendId == b.id && loadedModelIds.contains($0.id)
             }
-            if !attributed { others.append("\(b.displayName) (~\(Fmt.gb(b.estimatedGB)))") }
+            if !attributed {
+                let charge = unattributedChargeGB(for: b)
+                // Only worth naming as a competitor for memory if it is
+                // actually holding a meaningful amount.
+                if charge >= 1 {
+                    others.append(String(format: "%@ (~%.0f GB)", b.displayName, charge))
+                }
+            }
         }
         return BudgetVerdict(wouldUseGB: total, budgetGB: budgetGB,
                              fits: total <= budgetGB, others: others)
@@ -670,68 +737,171 @@ final class AppState {
             }
         }
         var hasAPIOption: Bool { self == .codex || self == .claudeCode }
-    }
 
-    /// Models eligible for a given harness: only those whose `harness` target
-    /// actually populates every field that harness needs. This is what keeps
-    /// the picker from ever offering a choice that silently produces a broken
-    /// pointer — a model missing a `codexProfile`, for instance, simply never
-    /// appears in Codex's list.
-    func eligibleModels(for kind: HarnessKind) -> [ModelSpec] {
-        models.filter { model in
-            guard let h = model.harness else { return false }
-            switch kind {
-            case .hermes: return h.hermesProvider != nil && h.hermesModel != nil
-            case .pi: return h.piProvider != nil && h.piModel != nil
-            case .codex: return h.codexProfile != nil
-            case .claudeCode: return h.claudeLocalModel != nil && h.claudeLocalBaseURL != nil
+        /// The wire format this harness speaks. A backend that does not serve
+        /// it cannot host a model for this harness at all — no amount of
+        /// config writing fixes a protocol mismatch, it just relocates the
+        /// failure to the first request.
+        var requiredAPI: BackendAPI {
+            switch self {
+            case .hermes, .pi: return .chat
+            case .codex: return .responses
+            case .claudeCode: return .messages
             }
         }
     }
 
-    /// Points one harness at one model, or — for Codex/Claude Code — clears
-    /// it back to "API" when `model` is nil. This is the single write path
-    /// into every harness config; nothing else in ModelBar touches these
-    /// files, and the manifest entry is the only source for what gets written.
+    /// One entry in a harness picker: a manifest model, plus whether this
+    /// harness can actually use it and — when it cannot — why.
+    ///
+    /// Ineligible models are carried through rather than filtered out so the
+    /// menu can show them greyed with a reason. Silently omitting them made
+    /// the picker look broken: with only ds4 carrying hand-written harness
+    /// fields, every harness offered exactly one model and there was nothing
+    /// on screen to explain the absence of the other seven.
+    struct HarnessOption: Identifiable, Sendable {
+        var model: ModelSpec
+        var eligible: Bool
+        /// Present only when `eligible` is false.
+        var reason: String?
+        var id: String { model.id }
+    }
+
+    /// Every manifest model, judged against one harness.
+    ///
+    /// Eligibility is a property of the *backend's wire format*, not of whether
+    /// someone remembered to write harness fields into the manifest entry —
+    /// that inversion is the whole feature. A model on a backend that serves
+    /// the right API can be registered into the harness on the spot; one on a
+    /// backend that does not is shown disabled with the protocol named.
+    func harnessOptions(for kind: HarnessKind) -> [HarnessOption] {
+        models.map { model in
+            guard let backend = manifest?.backend(id: model.backendId) else {
+                return HarnessOption(model: model, eligible: false,
+                                     reason: "unknown backend \(model.backendId)")
+            }
+            guard backend.apis.contains(kind.requiredAPI) else {
+                return HarnessOption(
+                    model: model, eligible: false,
+                    reason: "\(backend.displayName) does not serve \(kind.requiredAPI.path)")
+            }
+            guard model.apiModelName(for: kind) != nil else {
+                return HarnessOption(model: model, eligible: false,
+                                     reason: "no served model name in the manifest")
+            }
+            let missing = model.missingRequirements
+            guard missing.isEmpty else {
+                return HarnessOption(model: model, eligible: false,
+                                     reason: "\(missing.count) required file(s) not on disk")
+            }
+            return HarnessOption(model: model, eligible: true, reason: nil)
+        }
+    }
+
+    /// Backwards-compatible convenience: just the usable ones.
+    func eligibleModels(for kind: HarnessKind) -> [ModelSpec] {
+        harnessOptions(for: kind).filter(\.eligible).map(\.model)
+    }
+
+    /// Assembles the provider definition to write into a harness config.
+    /// Everything is derived from the backend + model pair, with the manifest's
+    /// existing per-harness fields taken as overrides where present so the
+    /// hand-tuned ds4 entry keeps working exactly as it did.
+    func registration(for model: ModelSpec, kind: HarnessKind) -> HarnessRegistration? {
+        guard let backend = manifest?.backend(id: model.backendId),
+              let modelName = model.apiModelName(for: kind) else { return nil }
+        let providerId = model.providerId(for: kind) ?? backend.id
+        return HarnessRegistration(
+            providerId: providerId,
+            providerLabel: "\(backend.displayName) (local)",
+            openAIBaseURL: backend.clientBaseURL,
+            anthropicBaseURL: backend.anthropicBaseURL,
+            modelName: modelName,
+            contextLength: model.effectiveContextLength(
+                selected: selectedContextSize(for: model)))
+    }
+
+    /// Registers a model into one harness if it is not already defined there,
+    /// then points that harness at it — or, for Codex/Claude Code, clears back
+    /// to "API" when `model` is nil.
+    ///
+    /// Registration first, pointer second, and the pointer is only moved if
+    /// registration succeeded: pointing a harness at a provider it has no
+    /// definition for is exactly the broken state this is meant to prevent.
+    ///
+    /// This remains the single write path into every harness config, and the
+    /// manifest is still the only source for what gets written — what changed
+    /// is that a manifest model no longer has to be pre-declared inside each
+    /// harness's own config file to be selectable. Removing a model used to
+    /// mean hand-editing six files; adding one meant the same.
     func pointHarness(_ kind: HarnessKind, at model: ModelSpec?) async {
         guard let config = manifest?.harness else { return }
-        let error: String?
 
-        switch (kind, model) {
-        case (.hermes, let m?):
-            guard let h = m.harness, let provider = h.hermesProvider, let name = h.hermesModel else {
-                note("No Hermes mapping for \(m.displayName)"); return
+        // Clearing back to "API" needs no registration.
+        if model == nil {
+            let error: String?
+            switch kind {
+            case .codex: error = HarnessControl.clearCodexProfile(config: config)
+            case .claudeCode: error = HarnessControl.clearClaudeLocal(config: config)
+            case .hermes, .pi: return  // no "off" state; picker never offers it
             }
-            error = await HarnessControl.setHermes(config: config, provider: provider, model: name)
-        case (.pi, let m?):
-            guard let h = m.harness, let provider = h.piProvider, let name = h.piModel else {
-                note("No Pi mapping for \(m.displayName)"); return
+            await refreshHarness()
+            note(error ?? "\(kind.displayName) → API")
+            return
+        }
+
+        guard let m = model else { return }
+
+        // Refuse rather than write a config that cannot work. The picker
+        // already greys these out; this is the guard for the CLI path and for
+        // anything that gets past the UI.
+        guard let option = harnessOptions(for: kind).first(where: { $0.id == m.id }),
+              option.eligible else {
+            let why = harnessOptions(for: kind).first { $0.id == m.id }?.reason
+                ?? "not eligible"
+            note("\(m.displayName) can't drive \(kind.displayName): \(why)")
+            return
+        }
+        guard let reg = registration(for: m, kind: kind) else {
+            note("No \(kind.displayName) mapping for \(m.displayName)")
+            return
+        }
+
+        var error: String?
+        switch kind {
+        case .hermes:
+            error = HarnessRegistrar.registerHermes(config: config, registration: reg)
+            if error == nil {
+                error = await HarnessControl.setHermes(config: config,
+                                                       provider: reg.providerId,
+                                                       model: reg.modelName)
             }
-            error = HarnessControl.setPi(config: config, provider: provider, model: name)
-        case (.codex, let m?):
-            guard let profile = m.harness?.codexProfile else {
-                note("No Codex profile for \(m.displayName)"); return
+        case .pi:
+            error = HarnessRegistrar.registerPi(config: config, registration: reg)
+            if error == nil {
+                error = HarnessControl.setPi(config: config,
+                                             provider: reg.providerId,
+                                             model: reg.modelName)
             }
-            error = HarnessControl.setCodexProfile(config: config, profile: profile)
-        case (.codex, nil):
-            error = HarnessControl.clearCodexProfile(config: config)
-        case (.claudeCode, let m?):
-            guard let cm = m.harness?.claudeLocalModel, let url = m.harness?.claudeLocalBaseURL else {
-                note("No Claude Code mapping for \(m.displayName)"); return
+        case .codex:
+            let profile = m.codexProfileName
+            error = HarnessRegistrar.registerCodex(config: config, profile: profile,
+                                                   registration: reg)
+            if error == nil {
+                error = HarnessControl.setCodexProfile(config: config, profile: profile)
             }
-            error = HarnessControl.setClaudeLocal(config: config, model: cm, baseURL: url)
-        case (.claudeCode, nil):
-            error = HarnessControl.clearClaudeLocal(config: config)
-        case (.hermes, nil), (.pi, nil):
-            return  // no "off" state for these — picker should never offer it
+        case .claudeCode:
+            // No provider definition exists to write: `claude-local` takes the
+            // endpoint as call-scoped environment, which is the entire reason
+            // this harness is safe to point at a local model at all. Bare
+            // `claude` is never touched — see HarnessControl.setClaudeLocal.
+            error = HarnessControl.setClaudeLocal(config: config,
+                                                  model: reg.modelName,
+                                                  baseURL: reg.anthropicBaseURL)
         }
 
         await refreshHarness()
-        if let error {
-            note(error)
-        } else {
-            note("\(kind.displayName) → \(model?.displayName ?? "API")")
-        }
+        note(error ?? "\(kind.displayName) → \(m.displayName)")
     }
 
     // MARK: - Alerts
@@ -849,5 +1019,72 @@ final class AppState {
             return "bolt.fill"   // actively generating — the one state worth a distinct icon
         }
         return loadedModelIds.isEmpty ? "cpu" : "cpu.fill"
+    }
+}
+
+// MARK: - Harness mapping
+//
+// How a manifest model presents itself to each harness. Kept as derivations
+// with manifest overrides rather than as four hand-written fields per model:
+// the point of registration is that adding a model to the manifest is enough,
+// and requiring a full set of per-harness names before it could be selected
+// would put the six-files-to-edit problem straight back.
+
+extension ModelSpec {
+
+    /// The string a client sends as `model`. Per-harness override first, then
+    /// the shared `apiName`, then the name the backend reports.
+    ///
+    /// `servedName` is the last resort rather than the first because the two
+    /// are not the same concept: it exists to *recognise* a loaded model in a
+    /// health response, and for at least one backend it is a display string
+    /// with spaces that no client could send.
+    func apiModelName(for kind: AppState.HarnessKind) -> String? {
+        let perHarness: String?
+        switch kind {
+        case .hermes: perHarness = harness?.hermesModel
+        case .pi: perHarness = harness?.piModel
+        case .codex: perHarness = harness?.codexModel
+        case .claudeCode: perHarness = harness?.claudeLocalModel
+        }
+        let name = perHarness ?? harness?.apiName ?? servedName
+        return (name?.isEmpty == false) ? name : nil
+    }
+
+    /// Provider key override for a harness, if the manifest names one. `nil`
+    /// means "use the backend id", which is what every current entry resolves
+    /// to anyway.
+    func providerId(for kind: AppState.HarnessKind) -> String? {
+        switch kind {
+        case .hermes: return harness?.hermesProvider
+        case .pi: return harness?.piProvider
+        case .codex: return harness?.codexProvider
+        case .claudeCode: return nil   // no provider concept; env-scoped
+        }
+    }
+
+    /// Codex profile file name (`~/.codex/<name>.config.toml`). Derived from
+    /// the model id when the manifest does not name one, so a new model is
+    /// selectable in Codex without a manifest edit.
+    var codexProfileName: String {
+        if let p = harness?.codexProfile, !p.isEmpty { return p }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let slug = id.unicodeScalars
+            .map { allowed.contains($0) ? Character($0) : "-" }
+            .reduce(into: "") { acc, ch in
+                // Collapse runs of separators; a profile name is a filename.
+                if ch == "-" && acc.hasSuffix("-") { return }
+                acc.append(ch)
+            }
+        return slug.trimmingCharacters(in: CharacterSet(charactersIn: "-")).lowercased()
+    }
+
+    /// Context window to advertise to a harness: the live selection when this
+    /// model has an adjustable one, else the manifest's fixed figure, else a
+    /// conservative default that no local model here is smaller than.
+    func effectiveContextLength(selected: Int) -> Int {
+        if context != nil, selected > 0 { return selected }
+        if let fixed = contextLength, fixed > 0 { return fixed }
+        return 32768
     }
 }
