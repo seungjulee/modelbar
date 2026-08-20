@@ -147,13 +147,51 @@ final class AppState {
     /// starts: the user's last pick if it is still a valid option, else the
     /// manifest default. Returns 0 for a model with no adjustable context.
     func selectedContextSize(for model: ModelSpec) -> Int {
-        guard let ctx = model.context else { return 0 }
-        if let picked = contextSelection[model.id], ctx.options.contains(picked) { return picked }
-        return ctx.defaultSize
+        guard model.context != nil else { return 0 }
+        let sizes = contextSizes(for: model)
+        if let picked = contextSelection[model.id], sizes.contains(picked) { return picked }
+        if let def = model.context?.defaultSize, def > 0 { return def }
+        return sizes.last ?? 0
+    }
+
+    /// Selectable sizes for a model: the manifest's explicit ladder when it
+    /// gives one, else a standard ladder clipped to the model's own trained
+    /// ceiling, with the ceiling itself always included as the top rung.
+    ///
+    /// Nothing above the ceiling is ever offered. Exceeding
+    /// `max_position_embeddings` / `<arch>.context_length` does not fail
+    /// loudly — it silently degrades output quality — so an option that looks
+    /// available and quietly makes the model worse is the worst of the three
+    /// possible behaviours.
+    func contextSizes(for model: ModelSpec) -> [Int] {
+        guard let ctx = model.context else { return [] }
+        if let explicit = ctx.options, !explicit.isEmpty { return explicit.sorted() }
+        guard let ceiling = geometry(for: model)?.contextCeiling, ceiling > 0 else {
+            // No ceiling discoverable: fall back to the declared default alone
+            // rather than inventing a ladder that might exceed what the model
+            // can actually do.
+            return ctx.defaultSize > 0 ? [ctx.defaultSize] : []
+        }
+        let ladder = [8192, 16384, 32768, 65536, 131072, 262144, 524288, 1_048_576]
+        var sizes = ladder.filter { $0 < ceiling }
+        sizes.append(ceiling)
+        return sizes
+    }
+
+    /// Each selectable size, priced against the memory budget.
+    func contextChoices(for model: ModelSpec) -> [ContextChoice] {
+        let committed = committedGB(excludingPort: model.port)
+        return contextSizes(for: model).map { size in
+            let total = estimatedGB(for: model, atContextSize: size)
+            return ContextChoice(size: size,
+                                 kvGB: kvGB(for: model, atContextSize: size),
+                                 totalGB: total,
+                                 fits: committed + total <= budgetGB)
+        }
     }
 
     func setContextSize(_ size: Int, for model: ModelSpec) {
-        guard let ctx = model.context, ctx.options.contains(size) else { return }
+        guard let ctx = model.context, contextSizes(for: model).contains(size) else { return }
         contextSelection[model.id] = size
         UserDefaults.standard.set(contextSelection, forKey: Self.contextSelectionKey)
 
@@ -173,11 +211,70 @@ final class AppState {
         note("\(model.displayName) context set to \(size.formatted()) — applies on next load")
     }
 
+    // MARK: - Geometry
+
+    /// Trained ceiling + KV cost per model, read from the model's own
+    /// metadata. Cached: an MLX config.json parse and a GGUF header read are
+    /// real I/O and this is consulted whenever a picker is drawn.
+    private var geometryCache: [String: ModelGeometry?] = [:]
+
+    func geometry(for model: ModelSpec) -> ModelGeometry? {
+        if let cached = geometryCache[model.id] { return cached }
+        let g = ModelGeometryReader.read(for: model)
+        geometryCache[model.id] = g
+        return g
+    }
+
+    /// KV cache cost at a given context size, GB.
+    ///
+    /// Returns zero for a backend that does not reserve KV up front. MLX grows
+    /// its cache lazily as a conversation extends, so charging a full-context
+    /// KV against the budget at load time would block loads that are actually
+    /// fine; llama.cpp-family backends allocate the whole thing at startup and
+    /// genuinely do cost it immediately.
+    func kvGB(for model: ModelSpec, atContextSize size: Int) -> Double {
+        guard let ctx = model.context, ctx.reservesKVUpFront else { return 0 }
+        guard let g = geometry(for: model), g.kvBytesPerTokenF16 > 0 else { return 0 }
+        return g.kvGB(at: size)
+    }
+
+    /// Estimated resident size for a model at a given context size.
+    ///
+    /// Priority matters. A manifest `gbPer100k` is a *measured* curve and always
+    /// wins over the computed one, because the computation assumes a plain
+    /// attention KV cache and some models do not have one: ds4's compressed
+    /// attention measures 1.12 GiB at 100K and 1.89 GiB at 200K, where the
+    /// generic formula over its GGUF geometry would predict ~16 GB at 200K —
+    /// wrong by nine times, and wrong in the direction that blocks valid loads.
+    func estimatedGB(for model: ModelSpec, atContextSize size: Int) -> Double {
+        if let ctx = model.context, ctx.gbPer100k > 0 {
+            return model.estimatedGB(atContextSize: size)
+        }
+        return model.estimatedGB + kvGB(for: model, atContextSize: size)
+    }
+
+    /// The model's size at whatever context is currently selected.
+    func estimatedGB(for model: ModelSpec) -> Double {
+        estimatedGB(for: model, atContextSize: selectedContextSize(for: model))
+    }
+
+    /// Provenance line for a model's context ceiling, shown at the foot of the
+    /// picker. Naming the source matters here: these numbers replaced a
+    /// hardcoded ladder that was wrong, and "read from config.json" is what
+    /// makes them checkable rather than another set of magic constants.
+    func ceilingNote(for model: ModelSpec) -> String? {
+        guard let g = geometry(for: model) else { return nil }
+        var s = "max \(g.contextCeiling.formatted()) tokens · from \(g.source)"
+        if let n = g.note { s += "\n\(n)" }
+        return s
+    }
+
     // MARK: - Manifest
 
     func reloadManifest() {
         do {
             let load = try ManifestLoader.load(path: manifestPath)
+            geometryCache.removeAll()
             manifest = load.manifest
             manifestWarnings = load.warnings
             manifestError = nil
@@ -362,7 +459,7 @@ final class AppState {
         var total = 0.0
         for model in models where loadedModelIds.contains(model.id) {
             if let skip = excludingPort, model.port == skip { continue }
-            total += model.estimatedGB(atContextSize: selectedContextSize(for: model))
+            total += estimatedGB(for: model)
         }
         // Backends with their own footprint not attributable to a manifest
         // model — ComfyUI's diffusers pipeline being the case that matters.
@@ -410,11 +507,11 @@ final class AppState {
 
     func budgetCheck(for model: ModelSpec) -> BudgetVerdict {
         let committed = committedGB(excludingPort: model.port)
-        let modelGB = model.estimatedGB(atContextSize: selectedContextSize(for: model))
+        let modelGB = estimatedGB(for: model)
         let total = committed + modelGB
         var others: [String] = []
         for m in models where loadedModelIds.contains(m.id) && m.port != model.port {
-            others.append("\(m.displayName) (~\(Fmt.gb(m.estimatedGB(atContextSize: selectedContextSize(for: m)))))")
+            others.append("\(m.displayName) (~\(Fmt.gb(estimatedGB(for: m))))")
         }
         for b in backends where b.estimatedGB > 0 && b.port != model.port {
             guard statuses[b.id]?.up == true else { continue }
@@ -948,7 +1045,7 @@ final class AppState {
             break
         }
         NSApp.activate(ignoringOtherApps: true)
-        let modelGB = model.estimatedGB(atContextSize: selectedContextSize(for: model))
+        let modelGB = estimatedGB(for: model)
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "Loading \(model.displayName) would exceed the memory budget"

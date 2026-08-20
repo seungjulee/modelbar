@@ -229,7 +229,13 @@ enum GGUFHeader {
         case string, array, uint64, int64, float64
     }
 
-    static func readMetadata(path: String) -> [String: String] {
+    /// Reads the wanted metadata keys. Numeric values are returned as their
+    /// decimal string so one code path serves both the discovery scan (which
+    /// wants `general.architecture`) and the geometry reader (which wants
+    /// block counts and head dimensions).
+    static func readMetadata(path: String,
+                             wanted: Set<String> = ["general.architecture", "general.name"])
+        -> [String: String] {
         guard let handle = FileHandle(forReadingAtPath: path) else { return [:] }
         defer { try? handle.close() }
 
@@ -243,9 +249,8 @@ enum GGUFHeader {
         guard reader.readUInt64() != nil else { return [:] }          // tensor_count
         guard let kvCount = reader.readUInt64() else { return [:] }
 
-        // Only these two keys are worth the read; bail once both are found
-        // rather than parsing the full (sometimes hundred-plus-entry) table.
-        let wanted: Set<String> = ["general.architecture", "general.name"]
+        // Bail once every wanted key is found rather than parsing the full
+        // (sometimes hundred-plus-entry) table.
         var remaining = wanted
 
         for _ in 0..<kvCount {
@@ -254,8 +259,7 @@ enum GGUFHeader {
             guard let rawType = reader.readUInt32(), let type = ValueType(rawValue: rawType) else {
                 break
             }
-            if remaining.contains(key), type == .string {
-                guard let value = reader.readGGUFString() else { break }
+            if remaining.contains(key), let value = reader.readScalarAsString(type: type) {
                 out[key] = value
                 remaining.remove(key)
             } else {
@@ -286,6 +290,27 @@ enum GGUFHeader {
             guard let bytes = readData(Int(len)) else { return nil }
             return String(decoding: bytes, as: UTF8.self)
         }
+        /// Reads one scalar value and renders it as a string. Returns nil for
+        /// arrays and anything unreadable, leaving the caller to skip instead.
+        func readScalarAsString(type: ValueType) -> String? {
+            func u(_ n: Int) -> Data? { readData(n) }
+            switch type {
+            case .string: return readGGUFString()
+            case .uint8:  return u(1).map { "\($0[$0.startIndex])" }
+            case .int8:   return u(1).map { "\(Int8(bitPattern: $0[$0.startIndex]))" }
+            case .uint16: return u(2).map { d in "\(d.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) })" }
+            case .int16:  return u(2).map { d in "\(d.withUnsafeBytes { $0.loadUnaligned(as: Int16.self) })" }
+            case .uint32: return u(4).map { d in "\(d.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) })" }
+            case .int32:  return u(4).map { d in "\(d.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) })" }
+            case .float32: return u(4).map { d in "\(d.withUnsafeBytes { $0.loadUnaligned(as: Float32.self) })" }
+            case .uint64: return u(8).map { d in "\(d.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) })" }
+            case .int64:  return u(8).map { d in "\(d.withUnsafeBytes { $0.loadUnaligned(as: Int64.self) })" }
+            case .float64: return u(8).map { d in "\(d.withUnsafeBytes { $0.loadUnaligned(as: Float64.self) })" }
+            case .bool:   return u(1).map { $0[$0.startIndex] == 0 ? "false" : "true" }
+            case .array:  return nil
+            }
+        }
+
         /// Advances past one value of the given type without materialising it.
         func skip(type: ValueType) -> Bool {
             switch type {

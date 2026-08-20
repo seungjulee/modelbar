@@ -364,6 +364,9 @@ struct MenuContentView: View {
                     loaded: state.isLoaded(model),
                     activity: state.activity,
                     contextSize: model.context != nil ? state.selectedContextSize(for: model) : nil,
+                    choices: model.context != nil ? state.contextChoices(for: model) : [],
+                    ceilingNote: state.ceilingNote(for: model),
+                    totalGB: state.estimatedGB(for: model),
                     onLoad: { Task { await state.load(model) } },
                     onStop: { Task { await state.stop(model) } },
                     onSetContext: { size in state.setContextSize(size, for: model) })
@@ -482,6 +485,13 @@ struct ModelRowView: View {
     /// Currently-selected context size, or nil if this model has none
     /// adjustable (hidden entirely, not shown disabled — see `ContextOption`).
     var contextSize: Int?
+    /// Selectable context sizes, already priced against the live budget.
+    var choices: [ContextChoice] = []
+    /// Where the ceiling came from, shown at the foot of the picker so the
+    /// numbers are traceable to the model's own metadata.
+    var ceilingNote: String?
+    /// Weights plus whatever KV the current context selection implies.
+    var totalGB: Double = 0
     var onLoad: () -> Void
     var onStop: () -> Void
     var onSetContext: (Int) -> Void
@@ -522,8 +532,7 @@ struct ModelRowView: View {
                 Text(backendName)
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
-                Text(model.estimatedGB > 0
-                     ? String(format: "%.0f GB", model.estimatedGB) : "—")
+                Text(totalGB > 0 ? String(format: "%.0f GB", totalGB) : "—")
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -545,8 +554,8 @@ struct ModelRowView: View {
                     Button(loaded ? "Restart" : "Load", action: onLoad)
                         .disabled(activity.isBusy)
                     if loaded { Button("Stop", action: onStop).disabled(activity.isBusy) }
-                    if let ctx = model.context, let current = contextSize {
-                        contextPicker(ctx, current: current)
+                    if model.context != nil, let current = contextSize {
+                        contextPicker(current: current)
                     }
                     Spacer()
                 }
@@ -582,19 +591,47 @@ struct ModelRowView: View {
 
     /// Context picker: restart-to-apply, so it never touches a running
     /// server — it only decides what argv the *next* load uses.
-    private func contextPicker(_ ctx: ContextOption, current: Int) -> some View {
+    ///
+    /// Each option carries its estimated total memory, because that is the
+    /// number that actually decides whether a choice is safe — a bare list of
+    /// token counts gives no way to tell which ones this machine can hold.
+    /// Options that would not fit the budget stay selectable but are marked,
+    /// rather than hidden: the right fix is often to unload something else,
+    /// which the user cannot reason about if the option has vanished.
+    private func contextPicker(current: Int) -> some View {
         Menu {
-            ForEach(ctx.options, id: \.self) { size in
-                Button(size == current ? "✓ \(size.formatted())" : size.formatted()) {
-                    onSetContext(size)
+            ForEach(choices) { choice in
+                Button {
+                    onSetContext(choice.size)
+                } label: {
+                    Text(contextOptionLabel(choice, current: current))
                 }
             }
+            if let ceiling = ceilingNote {
+                Divider()
+                Text(ceiling)
+            }
         } label: {
-            Text("ctx \(current.formatted())")
+            Text("ctx \(currentLabel(current))")
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help("Context window — restart to apply")
+    }
+
+    private func contextOptionLabel(_ choice: ContextChoice, current: Int) -> String {
+        var s = choice.size == current ? "✓ \(choice.label)" : "   \(choice.label)"
+        if choice.kvGB > 0 {
+            s += String(format: "  ·  +%.1f GB KV", choice.kvGB)
+        }
+        s += String(format: "  ·  ~%.0f GB total", choice.totalGB)
+        if !choice.fits { s += "  ·  over budget" }
+        return s
+    }
+
+    private func currentLabel(_ current: Int) -> String {
+        choices.first { $0.size == current }?.label
+            ?? (current >= 1024 ? "\(current / 1024)K" : "\(current)")
     }
 }
 

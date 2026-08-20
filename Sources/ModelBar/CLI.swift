@@ -262,12 +262,24 @@ enum CLI {
             print("usage: --cli context <model-id> <size>")
             return 2
         }
-        guard let ctx = model.context else {
+        guard model.context != nil else {
             print("\(model.displayName) has no adjustable context")
+            if let g = state.geometry(for: model) {
+                print("  trained ceiling \(g.contextCeiling) (\(g.source))"
+                      + String(format: " · KV ~%.1f GB at ceiling, f16", g.kvGB(at: g.contextCeiling)))
+                if let n = g.note { print("  \(n)") }
+            }
             return 2
         }
-        guard ctx.options.contains(size) else {
-            print("size \(size) not in \(ctx.options)")
+        let choices = state.contextChoices(for: model)
+        guard choices.contains(where: { $0.size == size }) else {
+            print("size \(size) not offered for \(model.displayName)")
+            print("available: " + choices.map { c in
+                String(format: "%@ (%.0f) ", c.label, c.totalGB)
+            }.joined())
+            if let g = state.geometry(for: model) {
+                print("trained ceiling: \(g.contextCeiling) (\(g.source))")
+            }
             return 2
         }
         state.setContextSize(size, for: model)

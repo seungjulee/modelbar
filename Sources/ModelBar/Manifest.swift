@@ -343,7 +343,12 @@ struct ContextOption: Decodable, Sendable {
     var file: String?
     /// Key to rewrite inside `file` (e.g. `context_size`).
     var key: String?
-    var options: [Int]
+    /// Explicit ladder. `nil` means "derive from the model's trained ceiling",
+    /// which is the preferred form: a hardcoded ladder is how every model here
+    /// ended up capped at 32K regardless of what it was actually trained for.
+    /// Set it only where the usable range is narrower than the ceiling for a
+    /// reason the metadata cannot express.
+    var options: [Int]?
     var defaultSize: Int
     /// GB delta per 100K tokens of context, for the memory-budget guard.
     /// Backend-specific and measured, not assumed: ds4's compressed-attention
@@ -352,9 +357,16 @@ struct ContextOption: Decodable, Sendable {
     /// that, so this is deliberately a per-model manifest value, not a
     /// hardcoded constant that would silently mis-price a different backend.
     var gbPer100k: Double
+    /// Whether the backend allocates the whole KV cache at load time.
+    ///
+    /// True for the llama.cpp family, which reserves the full context up front
+    /// and so really does cost it the moment the model loads. MLX grows its
+    /// cache lazily as a conversation extends, so charging a full-context KV
+    /// against the budget at load time would refuse loads that are fine.
+    var reservesKVUpFront: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case flag, file, key, options, defaultSize, gbPer100k
+        case flag, file, key, options, defaultSize, gbPer100k, reservesKVUpFront
     }
 
     init(from decoder: Decoder) throws {
@@ -362,9 +374,10 @@ struct ContextOption: Decodable, Sendable {
         flag = try c.decodeIfPresent(String.self, forKey: .flag) ?? ""
         file = try c.decodeIfPresent(String.self, forKey: .file)
         key = try c.decodeIfPresent(String.self, forKey: .key)
-        options = try c.decode([Int].self, forKey: .options)
-        defaultSize = try c.decodeIfPresent(Int.self, forKey: .defaultSize) ?? (options.last ?? 0)
+        options = try c.decodeIfPresent([Int].self, forKey: .options)
+        defaultSize = try c.decodeIfPresent(Int.self, forKey: .defaultSize) ?? (options?.last ?? 0)
         gbPer100k = try c.decodeIfPresent(Double.self, forKey: .gbPer100k) ?? 0
+        reservesKVUpFront = try c.decodeIfPresent(Bool.self, forKey: .reservesKVUpFront) ?? true
     }
 
     var resolvedFile: String? { file?.expandingTilde }
@@ -447,11 +460,16 @@ struct ModelSpec: Decodable, Sendable, Identifiable {
     /// here but is still worth telling a harness about. Ignored when `context`
     /// is present, which carries the live selection instead.
     var contextLength: Int?
+    /// Explicit path to the file carrying this model's geometry — an MLX
+    /// `config.json` or a `.gguf`. Only needed when it cannot be picked out of
+    /// `requires`, which is the case for a model whose manifest entry names a
+    /// backend config file instead of the weights (LocalAI).
+    var metadataPath: String?
 
     private enum CodingKeys: String, CodingKey {
         case id, displayName, backendId, estimatedGB, port, notes, shortName, drafters
         case servedName, requires, start, stop, loadedCheck, harness, sleepIdleSeconds, context
-        case contextLength
+        case contextLength, metadataPath
     }
 
     init(from decoder: Decoder) throws {
@@ -473,6 +491,7 @@ struct ModelSpec: Decodable, Sendable, Identifiable {
         sleepIdleSeconds = try c.decodeIfPresent(Double.self, forKey: .sleepIdleSeconds)
         context = try c.decodeIfPresent(ContextOption.self, forKey: .context)
         contextLength = try c.decodeIfPresent(Int.self, forKey: .contextLength)
+        metadataPath = try c.decodeIfPresent(String.self, forKey: .metadataPath)
     }
 
     /// Compact menubar label: the manifest's `shortName` if given, else the
@@ -504,7 +523,8 @@ struct ModelSpec: Decodable, Sendable, Identifiable {
         if let drafter = activeDrafter {
             cmd.argv = cmd.argv + drafter.resolvedExtraArgs
         }
-        if let ctx = context, let size = contextSize ?? Optional(ctx.defaultSize),
+        if let ctx = context, !ctx.flag.isEmpty,
+           let size = contextSize ?? Optional(ctx.defaultSize),
            let flagIndex = cmd.argv.firstIndex(of: ctx.flag), flagIndex + 1 < cmd.argv.count {
             cmd.argv[flagIndex + 1] = String(size)
         }
