@@ -295,12 +295,40 @@ struct MemoryView: View {
     var freeBytes: UInt64
     var gpu: GPUSnapshot
     var aiFootprint: UInt64
+    /// Who the used memory belongs to. A bare percentage cannot distinguish a
+    /// deliberately-loaded 84 GB model from a runaway process, and that is the
+    /// question a high number actually prompts.
+    var attribution: AppState.MemoryAttribution
 
     /// Swap is only alarming when it is actively growing. macOS does not page
     /// swap back in when pressure drops, so a non-zero resting figure is
     /// usually just history.
     private var swapTint: Color {
         swapTrend == .growing && swap.isNonZero ? .red : .secondary
+    }
+
+    /// "of 127 GB in use: ≈84 GB DeepSeek-V4-Flash · ≈43 GB other", naming the
+    /// model when one dominates and counting them when several are up.
+    ///
+    /// The denominator is stated inline because it is deliberately *not* the
+    /// figure in the bar above (see `MemoryAttribution`): the bar reports
+    /// Activity Monitor's "used", which excludes the file cache where mmapped
+    /// weights sit, so an unlabelled split against a different total would look
+    /// like an arithmetic error. The `≈` is not decoration either — these are
+    /// declared sizes, and implying measured precision would be a claim the
+    /// numbers cannot support.
+    private var attributionText: String {
+        let mine: String
+        if attribution.modelCount == 1, let name = attribution.primaryLabel {
+            mine = String(format: "≈%.0f GB %@", attribution.modelGB, name)
+        } else if let name = attribution.primaryLabel {
+            mine = String(format: "≈%.0f GB %@ +%d more",
+                          attribution.modelGB, name, attribution.modelCount - 1)
+        } else {
+            mine = String(format: "≈%.0f GB loaded models", attribution.modelGB)
+        }
+        return String(format: "of %.0f GB in use: ", attribution.spokenForGB)
+            + mine + String(format: " · ≈%.0f GB other", attribution.otherGB)
     }
 
     var body: some View {
@@ -310,6 +338,32 @@ struct MemoryView: View {
             MeterRow(label: "RAM", fraction: memory.usedFraction,
                      value: String(format: "%.0f%%", memory.usedFraction * 100),
                      detail: "\(Fmt.gb(memory.usedBytes)) of \(Fmt.gb(memory.totalBytes))")
+
+            // The attribution line. Placed directly under the bar rather than
+            // in a tooltip: it is the explanation for the number immediately
+            // above it, and a number that needs explaining should not require
+            // a hover to get one.
+            if attribution.hasModels {
+                HStack(spacing: 8) {
+                    Text("").frame(width: 38)
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.accentColor).frame(width: 5, height: 5)
+                        Text(attributionText)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.tail)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .help("Counted against used + cached, not the \"used\" figure above. A "
+                      + "model's weights sit in wired memory once the GPU holds them, and "
+                      + "in the file cache while they are only mmapped — \"used\" counts "
+                      + "the first and excludes the second, so it alone cannot account for "
+                      + "a loaded model. Either way the memory is spoken for and invisible "
+                      + "to per-process tools: ds4-server reports a ~20 MB RSS while "
+                      + "holding its whole model. Sizes are the manifest's declared "
+                      + "figures, not measurements.")
+            }
 
             HStack(spacing: 8) {
                 Text("").frame(width: 38)

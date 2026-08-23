@@ -53,13 +53,18 @@ enum CLI {
             print("""
             ModelBar CLI — same code paths as the menubar app.
 
-              --cli validate            parse the manifest, check every referenced path
-              --cli status              backend health + served model + telemetry
-              --cli monitor             one-shot htop-style resource snapshot
-              --cli start <model-id>    stop the port's occupant, start the model, await health
-              --cli stop  <model-id>    stop the server on that model's port
-              --cli harness show        what Pi and Hermes point at
-              --cli harness set <id>    point both at a model
+              --cli validate                  parse the manifest, check every referenced path
+              --cli status                    backend health + served model + telemetry
+              --cli monitor                   one-shot htop-style resource snapshot
+              --cli start <model-id>          stop the port's occupant, start it, await health
+              --cli stop  <model-id>          stop the server on that model's port
+              --cli context <model-id> <n>    set the context window for the next load
+              --cli discover                  models on disk / in a backend, not in the manifest
+              --cli harness show              what every harness currently points at
+              --cli harness set <harness> <model-id|api>
+                                              point one harness at a model.
+                                              <harness> is hermes | pi | codex | claude;
+                                              "api" (codex/claude only) disarms the local wrapper
 
             Add --manifest <path> to use a manifest other than ~/models/modelbar.json.
 

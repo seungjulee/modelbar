@@ -15,12 +15,21 @@ struct HarnessState: Sendable, Equatable {
     var errors: [String] = []
 }
 
-/// Reads and rewrites the two harness configs.
+/// Moves each harness's *pointer* between models it already knows. Creating the
+/// definitions those pointers resolve against is `HarnessRegistrar`'s job.
 ///
-/// Hermes is driven through its own CLI (`hermes config set`) rather than by
-/// editing config.yaml, so Hermes owns the file format and any migrations.
-/// Pi has no such CLI, so its settings.json is edited directly — key by key,
-/// preserving everything else, and written atomically.
+/// The mechanism differs per harness because their config surfaces do:
+///
+///   * **Hermes** — `hermes config set` for the two scalar pointer keys
+///     (`model.provider`, `model.default`), so Hermes owns its own file format
+///     and migrations. Note this is *only* safe for scalars: the same CLI
+///     stores a list value as a quoted string, which is why registration writes
+///     `providers:` as targeted YAML instead (see `registerHermes`).
+///   * **Pi** — no CLI, so settings.json is edited key by key, preserving every
+///     other key, written atomically.
+///   * **Codex / Claude Code** — a one-line env file each, read by the
+///     `codex-local` / `claude-local` shell wrappers. Nothing here touches what
+///     a bare `codex` or `claude` invocation does.
 enum HarnessControl {
 
     // MARK: - Reading

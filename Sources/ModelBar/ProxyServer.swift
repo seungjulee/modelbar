@@ -37,9 +37,11 @@ actor ProxyServer {
         var idleReapInterval: Double = 5
     }
 
-    /// What the proxy is doing right now, for the UI. `AppState` mirrors this
-    /// into its own published `Activity` so the menu does not need to poll the
-    /// proxy directly.
+    /// What the proxy is doing right now. Internal lifecycle state, not a UI
+    /// feed: the menu derives everything it shows from `AppState.activity` /
+    /// `isLoaded` / `statuses`, which is what drives the spawn and stop logic
+    /// too, so it cannot drift from reality the way a separately-mirrored copy
+    /// of this could.
     enum Phase: Sendable, Equatable {
         case idle                              // listening, backend not running
         case startingForRequest(modelId: String, since: Date)
@@ -71,7 +73,6 @@ actor ProxyServer {
     private let resolveModelId: @Sendable () async -> String?
     private let ensureRunning: @Sendable (_ modelId: String, _ auto: Bool) async -> Bool
     private let idleTimeoutFor: @Sendable (_ modelId: String) async -> Double
-    private let onPhaseChange: @Sendable (String, Phase) -> Void
     private let stopIdle: @Sendable (_ modelId: String) async -> Void
 
     init(backendId: String,
@@ -79,8 +80,7 @@ actor ProxyServer {
          resolveModelId: @escaping @Sendable () async -> String?,
          ensureRunning: @escaping @Sendable (String, Bool) async -> Bool,
          idleTimeoutFor: @escaping @Sendable (String) async -> Double,
-         stopIdle: @escaping @Sendable (String) async -> Void,
-         onPhaseChange: @escaping @Sendable (String, Phase) -> Void) {
+         stopIdle: @escaping @Sendable (String) async -> Void) {
         self.backendId = backendId
         self.config = config
         self.queue = DispatchQueue(label: "modelbar.proxy.\(backendId)")
@@ -88,7 +88,6 @@ actor ProxyServer {
         self.ensureRunning = ensureRunning
         self.idleTimeoutFor = idleTimeoutFor
         self.stopIdle = stopIdle
-        self.onPhaseChange = onPhaseChange
     }
 
     // MARK: - Lifecycle
@@ -134,8 +133,20 @@ actor ProxyServer {
         reaperTask = nil
         listener?.cancel()
         listener = nil
-        if case .running(let modelId) = phase {
+
+        // A backend caught mid-start is the case that actually orphans one.
+        // The spawn is detached and already in flight, so dropping the listener
+        // does not stop it, and the reaper that would eventually have collected
+        // it has just been cancelled — quitting here left ~84 GB resident with
+        // nothing owning its lifecycle. Let the start settle first, then stop
+        // whatever it produced.
+        if let ensureTask { _ = await ensureTask.value }
+
+        switch phase {
+        case .running(let modelId), .startingForRequest(let modelId, _):
             await stopIdle(modelId)
+        case .stoppingIdle, .idle:
+            break
         }
         setPhase(.idle)
     }
@@ -147,7 +158,6 @@ actor ProxyServer {
 
     private func setPhase(_ p: Phase) {
         phase = p
-        onPhaseChange(backendId, p)
     }
 
     // MARK: - Per-connection handling
@@ -280,18 +290,32 @@ actor ProxyServer {
         // expects to parse an HTTP response and most surface the body of a
         // non-2xx reply in their own error message, so this turns "connection
         // reset, no idea why" into an actual readable reason.
-        let body = "{\"error\":{\"message\":\"ModelBar: \(reason)\",\"type\":\"modelbar_proxy_error\"}}"
+        // Escaped, because `reason` is interpolated into a JSON string body and
+        // a backend display name is free text from the manifest — an embedded
+        // quote would produce a malformed body that the client reports as a
+        // parse error instead of the diagnosis this exists to deliver.
+        let body = "{\"error\":{\"message\":\"ModelBar: \(jsonEscape(reason))\","
+            + "\"type\":\"modelbar_proxy_error\"}}"
         let response = "HTTP/1.1 503 Service Unavailable\r\n"
             + "Content-Type: application/json\r\n"
             + "Content-Length: \(body.utf8.count)\r\n"
             + "Connection: close\r\n\r\n\(body)"
-        client.start(queue: queue)
+        // No `client.start` here: `accept` already started this connection, and
+        // starting an NWConnection twice is an API misuse.
         await withCheckedContinuation { cont in
             client.send(content: Data(response.utf8), completion: .contentProcessed { _ in
                 cont.resume()
             })
         }
         client.cancel()
+    }
+
+    private func jsonEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+         .replacingOccurrences(of: "\"", with: "\\\"")
+         .replacingOccurrences(of: "\n", with: "\\n")
+         .replacingOccurrences(of: "\r", with: "\\r")
+         .replacingOccurrences(of: "\t", with: "\\t")
     }
 
     // MARK: - Idle reaping

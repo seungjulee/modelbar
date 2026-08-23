@@ -224,7 +224,8 @@ struct MenuContentView: View {
             MemoryView(memory: state.memory, swap: state.swap,
                        swapTrend: state.swapTrend, freeBytes: state.freeBytes,
                        gpu: state.gpu,
-                       aiFootprint: state.procs.reduce(0) { $0 &+ $1.footprintBytes })
+                       aiFootprint: state.procs.reduce(0) { $0 &+ $1.footprintBytes },
+                       attribution: state.memoryAttribution)
 
             modelsSection
 
@@ -574,7 +575,14 @@ struct ModelRowView: View {
             .fill(hovering ? Color.primary.opacity(0.06) : .clear))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture { if available && !activity.isBusy { onLoad() } }
+        // Row-tap loads, but deliberately never *re*loads. The whole row is a
+        // click target, and for a model that is already up the same gesture
+        // used to mean "SIGTERM it and spend ~30 s reloading 84 GB" — a
+        // destructive action one stray click away, with no confirmation, that
+        // would drop whatever conversation the backend was mid-way through.
+        // Restarting is still available, as the explicit hover button that says
+        // so.
+        .onTapGesture { if available && !loaded && !activity.isBusy { onLoad() } }
         .help(available ? (model.notes ?? model.displayName)
               : "Required file(s) not found:\n" + missing.joined(separator: "\n"))
     }

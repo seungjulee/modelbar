@@ -88,11 +88,6 @@ final class AppState {
     private(set) var discovered: [DiscoveredItem] = []
     private var lastDiscoveryScan: Date?
 
-    /// Live phase per proxied backend (ds4, MLX), mirrored from each
-    /// `ProxyServer` actor. `nil` for a backend with no `publicPort` — those
-    /// are not proxied and have no on-demand lifecycle to show.
-    private(set) var proxyPhases: [String: ProxyServer.Phase] = [:]
-
     var activity: Activity = .idle
     private(set) var lastFailure: LoadFailure?
     private(set) var lastRefresh: Date?
@@ -109,7 +104,9 @@ final class AppState {
 
     private let monitor = ProcessMonitor()
     private var refreshTask: Task<Void, Never>?
-    private var isRefreshing = false
+    /// The refresh currently running, so concurrent callers can join it rather
+    /// than be dropped. See `refresh()`.
+    private var refreshInFlight: Task<Void, Never>?
     /// Remembers which manifest model was last started on each port, used to
     /// attribute a running server when the backend does not report a usable
     /// model name.
@@ -318,11 +315,27 @@ final class AppState {
         return menuOpen ? 1.0 : max(1, settings.pollSeconds)
     }
 
+    /// Refreshes every live counter, coalescing concurrent callers onto a single
+    /// pass.
+    ///
+    /// Joining the in-flight refresh matters rather than merely being tidy: the
+    /// caller that most needs fresh state is `load()`, which refreshes so its
+    /// memory guard is not deciding from stale `loadedModelIds`. An early
+    /// `return` when a poll happened to be mid-flight handed that guard exactly
+    /// the stale state it refreshes to avoid — so callers now await the running
+    /// pass and observe its result.
     func refresh() async {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
+        if let inFlight = refreshInFlight {
+            await inFlight.value
+            return
+        }
+        let task = Task { @MainActor [weak self] in await self?.performRefresh() ?? () }
+        refreshInFlight = task
+        await task.value
+        refreshInFlight = nil
+    }
 
+    private func performRefresh() async {
         // Cheap local counters first so the headline numbers are never stale
         // just because a backend is slow to answer.
         memory = SystemMemory.snapshot()
@@ -531,6 +544,56 @@ final class AppState {
                              fits: total <= budgetGB, others: others)
     }
 
+    /// Names what the machine's memory is actually spoken for by, so a high
+    /// number is self-explaining.
+    ///
+    /// This exists because "RAM 93%" on its own is unactionable: there is no way
+    /// to tell a deliberately-loaded 84 GB model from a runaway process, and
+    /// per-process tools cannot answer it either — `ds4-server` reports a ~20 MB
+    /// RSS while holding its entire model. ModelBar already knows which models
+    /// are resident and what each nominally costs, so it can simply say.
+    ///
+    /// **Measured against used + cached, deliberately, not against "used".** A
+    /// model's weights land in one of two very different places depending on the
+    /// backend and what it is doing: wired memory once the GPU has them
+    /// resident, or the file-backed page cache while they are merely mmapped.
+    /// The "Memory Used" figure (app + wired + compressed, matching Activity
+    /// Monitor) counts the first and excludes the second, so charging a declared
+    /// model size against it produces nonsense in the mmapped case — an 84 GB
+    /// model against 37 GB "used", yielding a negative remainder. Non-free
+    /// memory covers both homes and stays consistent as pages migrate between
+    /// them.
+    ///
+    /// `modelGB` is the manifest's declared figure, not a measurement — see
+    /// `committedGB` for why measuring is not available here. This is an
+    /// attribution, not an audit, and the UI marks it approximate.
+    struct MemoryAttribution: Sendable, Equatable {
+        var modelGB: Double
+        var otherGB: Double
+        /// Used + cached: everything not immediately free.
+        var spokenForGB: Double
+        /// The biggest resident model, which is almost always the answer to
+        /// "what is holding all that memory". Its *short* label: the full name
+        /// already appears twice above this line, and spelling it out a third
+        /// time pushed the numbers — the actual content — off the end.
+        var primaryLabel: String?
+        var modelCount: Int
+        var hasModels: Bool { modelCount > 0 }
+    }
+
+    var memoryAttribution: MemoryAttribution {
+        let spokenFor = Double(memory.usedBytes &+ memory.cachedFileBytes) / 1_073_741_824
+        let models = min(committedGB(), spokenFor)
+        return MemoryAttribution(
+            modelGB: models,
+            // Clamped: declared sizes are estimates and a negative "everything
+            // else" would be nonsense on screen.
+            otherGB: max(0, spokenFor - models),
+            spokenForGB: spokenFor,
+            primaryLabel: primaryLoadedModel?.shortLabel,
+            modelCount: loadedModelIds.count)
+    }
+
     // MARK: - Actions
 
     func note(_ text: String?) {
@@ -560,9 +623,28 @@ final class AppState {
         // The memory guard reads `loadedModelIds`, which only exists after a
         // refresh. Without this the guard silently passes on stale/empty state
         // — which is exactly what happens on the first action after launch, and
-        // on every CLI invocation, since neither has polled yet.
+        // on every CLI invocation, since neither has polled yet. The
+        // already-running check below depends on the same freshness, so this
+        // deliberately comes first.
         if lastRefresh == nil || Date().timeIntervalSince(lastRefresh ?? .distantPast) > 2 {
             await refresh()
+        }
+
+        // An auto-start means "make sure this is running", never "restart it".
+        //
+        // The proxy only reaches here after its 0.6 s probe connect failed, and
+        // that timing out is not proof the backend is down — a momentarily full
+        // accept queue or a scheduling hiccup looks identical. Without this the
+        // code below would SIGTERM a live, possibly mid-generation server and
+        // spend ~30 s reloading 84 GB to arrive at the state it was already in,
+        // dropping whatever conversation was in flight. Both signals are checked
+        // because neither alone is sufficient: `isLoaded` says the right model
+        // is resident, the health probe says the server is answering now.
+        // A manual click still restarts deliberately; only the automatic path
+        // is made idempotent.
+        if trigger == .incomingRequest, isLoaded(model),
+           let health = backend.url(backend.health.path), await Probe.get(health) != nil {
+            return true
         }
 
         let missing = model.missingRequirements
@@ -772,9 +854,6 @@ final class AppState {
                 stopIdle: { [weak self] modelId in
                     guard let self, let model = await self.manifest?.model(id: modelId) else { return }
                     await self.stop(model)
-                },
-                onPhaseChange: { [weak self] backendId, phase in
-                    Task { @MainActor in self?.proxyPhases[backendId] = phase }
                 })
 
             proxies[backend.id] = proxy
@@ -893,11 +972,6 @@ final class AppState {
             }
             return HarnessOption(model: model, eligible: true, reason: nil)
         }
-    }
-
-    /// Backwards-compatible convenience: just the usable ones.
-    func eligibleModels(for kind: HarnessKind) -> [ModelSpec] {
-        harnessOptions(for: kind).filter(\.eligible).map(\.model)
     }
 
     /// Assembles the provider definition to write into a harness config.

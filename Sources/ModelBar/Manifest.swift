@@ -745,12 +745,40 @@ enum ManifestLoader {
         var warnings: [String] = []
 
         var seenBackends = Set<String>()
+        // Every port a backend claims, and what claims it. Collisions here are
+        // not cosmetic: ModelBar binds each `publicPort` itself and spawns the
+        // real server on the matching `port`, so two backends sharing either
+        // number means one silently fails to bind, or a stop-by-port kills the
+        // wrong server. Neither surfaces as anything but "it stopped working".
+        var claimedPorts: [Int: String] = [:]
+        func claim(_ port: Int, _ owner: String) {
+            if let existing = claimedPorts[port], existing != owner {
+                warnings.append("port \(port) is claimed by both \(existing) and \(owner)")
+            } else {
+                claimedPorts[port] = owner
+            }
+        }
+
         for b in m.backends {
             if !seenBackends.insert(b.id).inserted {
                 warnings.append("duplicate backend id \"\(b.id)\"")
             }
             if !(1...65535).contains(b.port) {
                 warnings.append("backend \"\(b.id)\" has out-of-range port \(b.port)")
+            }
+            claim(b.port, "backend \"\(b.id)\"")
+            if let publicPort = b.publicPort {
+                if !(1...65535).contains(publicPort) {
+                    warnings.append(
+                        "backend \"\(b.id)\" has out-of-range publicPort \(publicPort)")
+                }
+                if publicPort == b.port {
+                    // The proxy would be forwarding to itself.
+                    warnings.append("backend \"\(b.id)\" has publicPort equal to its port "
+                                    + "(\(publicPort)) — the proxy would forward to itself")
+                } else {
+                    claim(publicPort, "backend \"\(b.id)\" publicPort")
+                }
             }
         }
 
