@@ -35,6 +35,12 @@ actor ProxyServer {
         var connectProbeTimeout: Double = 0.6   // fast path: is it already up?
         var connectStartTimeout: Double = 240   // cold path: allow a full cold load
         var idleReapInterval: Double = 5
+        /// How long to wait for a cold client's request line before giving up on
+        /// classifying it. An HTTP client sends its request immediately after
+        /// connecting, so this only ever elapses for something that connected
+        /// with nothing to say — which is exactly the case that must not wake a
+        /// backend.
+        var peekTimeout: Double = 5
     }
 
     /// What the proxy is doing right now. Internal lifecycle state, not a UI
@@ -181,9 +187,35 @@ actor ProxyServer {
             return
         }
 
-        // Cold path: coalesce concurrent first-requests into one spawn.
+        // Cold path. Before spending ~30 s and ~84 GB waking a backend, find out
+        // what was actually asked for.
+        //
+        // A bare TCP connect is not a reason to load a model, and treating it as
+        // one had a real cost: every harness that enumerates its configured
+        // providers at startup — Hermes does — touches this port and silently
+        // triggered a full DeepSeek load, even when the user had selected a
+        // different model entirely. A port scan or a stray browser tab did the
+        // same.
+        //
+        // Only the *first request line* is read, and only on this path: an
+        // already-warm backend (the fast path above) is spliced untouched, so
+        // steady-state traffic is completely unaffected. The bytes consumed here
+        // are replayed to the backend verbatim, so nothing is lost.
+        let peeked = await peekRequest(client)
+        guard let peeked else {
+            // Connected and said nothing within the window. There is no request
+            // to serve and nothing to wake for.
+            client.cancel()
+            return
+        }
+
         guard let modelId = await resolveModelId() else {
             await respondUnavailable(client, reason: "no default model configured for this backend")
+            return
+        }
+
+        guard peeked.wakesBackend else {
+            await respondAsleep(client, request: peeked, modelId: modelId)
             return
         }
 
@@ -197,7 +229,113 @@ actor ProxyServer {
             await respondUnavailable(client, reason: "backend started but is not accepting connections")
             return
         }
-        await splice(client: client, upstream: upstream)
+        await splice(client: client, upstream: upstream, replaying: peeked.bytes)
+    }
+
+    /// The opening bytes of a client request, plus the verdict on whether they
+    /// justify starting a backend.
+    private struct PeekedRequest {
+        /// Everything read off the socket, replayed upstream verbatim.
+        var bytes: Data
+        var method: String
+        var path: String
+
+        /// Whether this request actually needs the model.
+        ///
+        /// Allow-list rather than deny-list: an unrecognised route on a sleeping
+        /// backend answers "asleep" instead of loading 84 GB to find out what it
+        /// was. The routes here are the ones that genuinely cannot be answered
+        /// without weights.
+        var wakesBackend: Bool {
+            guard method == "POST" else { return false }
+            let route = path.split(separator: "?").first.map(String.init) ?? path
+            return ["/completions", "/chat/completions", "/responses",
+                    "/messages", "/embeddings", "/rerank", "/infill"]
+                .contains { route.hasSuffix($0) }
+        }
+    }
+
+    /// Reads until the end of the HTTP request line, or gives up.
+    ///
+    /// Bounded twice over — bytes and time — because this runs before any
+    /// decision is made and must never become a way to hang the listener.
+    private func peekRequest(_ client: NWConnection) async -> PeekedRequest? {
+        var buf = Data()
+        let deadline = Date().addingTimeInterval(config.peekTimeout)
+        while buf.count < 8192, Date() < deadline {
+            guard let chunk = await receiveChunk(client, timeout: config.peekTimeout),
+                  !chunk.isEmpty else { break }
+            buf.append(chunk)
+            guard let crlf = buf.firstRange(of: Data("\r\n".utf8)) else { continue }
+            let line = String(decoding: buf[buf.startIndex..<crlf.lowerBound], as: UTF8.self)
+            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard parts.count >= 2 else {
+                // Not HTTP at all. Forward it rather than guessing — a non-HTTP
+                // client on this port is not something to answer on its behalf.
+                return PeekedRequest(bytes: buf, method: "POST", path: "/")
+            }
+            return PeekedRequest(bytes: buf,
+                                 method: parts[0].uppercased(),
+                                 path: String(parts[1]))
+        }
+        return buf.isEmpty ? nil : PeekedRequest(bytes: buf, method: "POST", path: "/")
+    }
+
+    private func receiveChunk(_ conn: NWConnection, timeout: Double) async -> Data? {
+        await withCheckedContinuation { cont in
+            let box = ResumeOnce()
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
+                if box.claim() { cont.resume(returning: data) }
+            }
+            queue.asyncAfter(deadline: .now() + timeout) {
+                if box.claim() { cont.resume(returning: nil) }
+            }
+        }
+    }
+
+    /// Answers a probe without waking the backend.
+    ///
+    /// `/v1/models` returns a real listing rather than an error on purpose: it is
+    /// how clients discover what a provider offers, and a provider that appears
+    /// to serve nothing gets dropped from pickers. Naming the model that *would*
+    /// start is both true and the answer the caller wanted.
+    private func respondAsleep(_ client: NWConnection, request: PeekedRequest,
+                               modelId: String) async {
+        let route = request.path.split(separator: "?").first.map(String.init) ?? request.path
+
+        if request.method == "OPTIONS" {
+            return await send(client, status: "204 No Content", body: nil)
+        }
+        if route.hasSuffix("/models") {
+            let body = "{\"object\":\"list\",\"data\":[{\"id\":\"\(jsonEscape(modelId))\","
+                + "\"object\":\"model\",\"owned_by\":\"modelbar\"}]}"
+            return await send(client, status: "200 OK", body: body)
+        }
+        // Health and everything else: truthfully not ready, and say how to change
+        // that. 503 rather than 200 so a caller polling for readiness keeps
+        // waiting instead of firing a request into a backend that is not there.
+        let body = "{\"error\":{\"message\":\"ModelBar: \(jsonEscape(modelId)) is asleep. "
+            + "It starts automatically on a completion request; probes do not wake it.\","
+            + "\"type\":\"modelbar_backend_asleep\"}}"
+        await send(client, status: "503 Service Unavailable", body: body)
+    }
+
+    private func send(_ client: NWConnection, status: String, body: String?) async {
+        var head = "HTTP/1.1 \(status)\r\nConnection: close\r\n"
+        head += "Access-Control-Allow-Origin: *\r\n"
+        head += "Access-Control-Allow-Headers: Authorization, Content-Type\r\n"
+        head += "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        if let body {
+            head += "Content-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n"
+        } else {
+            head += "Content-Length: 0\r\n"
+        }
+        head += "\r\n"
+        let payload = Data((head + (body ?? "")).utf8)
+        await withCheckedContinuation { cont in
+            client.send(content: payload, completion: .contentProcessed { _ in cont.resume() })
+        }
+        client.cancel()
     }
 
     private func coalescedEnsureRunning(modelId: String) async -> Bool {
@@ -251,7 +389,19 @@ actor ProxyServer {
     /// Bidirectional byte copy. Each direction is an independent pump; when
     /// either side finishes (EOF or error), both connections are torn down —
     /// there is no meaningful half-open state to preserve for this use case.
-    private func splice(client: NWConnection, upstream: NWConnection) async {
+    private func splice(client: NWConnection, upstream: NWConnection,
+                        replaying prefix: Data? = nil) async {
+        // Bytes consumed while deciding whether to wake the backend go upstream
+        // first, ahead of the live pumps, so the backend sees the request exactly
+        // as the client sent it.
+        if let prefix, !prefix.isEmpty {
+            let ok: Bool = await withCheckedContinuation { cont in
+                upstream.send(content: prefix, completion: .contentProcessed { err in
+                    cont.resume(returning: err == nil)
+                })
+            }
+            guard ok else { client.cancel(); upstream.cancel(); return }
+        }
         await withTaskGroup(of: Void.self) { group in
             group.addTask { await self.pump(from: client, to: upstream) }
             group.addTask { await self.pump(from: upstream, to: client) }
