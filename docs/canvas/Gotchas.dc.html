@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #fbfbfd;
+      font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+      color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+    a { color: #0071e3; text-decoration: none; } a:hover { color: #0058b0; }
+    .sec { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+    .sec span { font-size: 10px; font-weight: 800; letter-spacing: 0.9px;
+      color: rgba(60,60,67,0.6); text-transform: uppercase; white-space: nowrap; }
+    .sec i { flex: 1; height: 1px; background: rgba(0,0,0,0.08); }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-variant-numeric: tabular-nums; }
+    .g { background: #fff; border: 1px solid rgba(0,0,0,0.07); border-radius: 10px;
+      padding: 15px 17px; display: flex; gap: 13px; align-items: flex-start; }
+    .sym { width: 20px; height: 20px; flex: none; margin-top: 1px; }
+    .gt { font-size: 13.5px; font-weight: 700; margin-bottom: 5px; }
+    .gb { font-size: 13px; line-height: 1.58; color: rgba(60,60,67,0.82); }
+  </style>
+</helmet>
+
+<div style="padding: 40px 44px 44px; display: flex; flex-direction: column; gap: 22px;">
+
+  <div>
+    <h2 style="margin: 0 0 6px; font-size: 23px; font-weight: 700; letter-spacing: -0.3px;">Things that will bite you</h2>
+    <p style="margin: 0; font-size: 14px; line-height: 1.55; color: rgba(60,60,67,0.75); max-width: 62ch;">
+      Each of these cost real debugging time. They share a shape: something silently
+      disagrees with what the config says.
+    </p>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 12px;">
+
+    <div class="g">
+      <svg class="sym" viewBox="0 0 24 24" fill="none" stroke="#ff3b30" stroke-width="1.6" stroke-linecap="round">
+        <circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.2"></path>
+      </svg>
+      <div>
+        <div class="gt">A saved context size outranks the manifest</div>
+        <div class="gb">Your last pick is persisted in <span class="mono" style="font-size:12px;">UserDefaults</span> and
+        silently overrides <span class="mono" style="font-size:12px;">context.defaultSize</span>. Change the manifest
+        to 64K, and the server can still launch at 128K &mdash; the value that overran the GPU cap.
+        Set it explicitly with <span class="mono" style="font-size:12px;">--cli context</span>, and check
+        <span class="mono" style="font-size:12px;">ps</span> for the real <span class="mono" style="font-size:12px;">-c</span>.</div>
+      </div>
+    </div>
+
+    <div class="g">
+      <svg class="sym" viewBox="0 0 24 24" fill="none" stroke="#ff9500" stroke-width="1.6" stroke-linecap="round">
+        <path d="M12 3.5 21 19H3z"></path><path d="M12 10v4M12 16.6v.2"></path>
+      </svg>
+      <div>
+        <div class="gt">servedName mismatches fail quietly</div>
+        <div class="gb">If it doesn't match what the backend reports, the model runs fine and shows as
+        <em>not loaded</em>. Backends change this out from under you: swapping
+        <span class="mono" style="font-size:12px;">mlx_lm.server</span> for
+        <span class="mono" style="font-size:12px;">mlx-dspark</span> changed the reported id from a full
+        descriptive name to <span class="mono" style="font-size:12px;">8-bit</span>.</div>
+      </div>
+    </div>
+
+    <div class="g">
+      <svg class="sym" viewBox="0 0 24 24" fill="none" stroke="#ff9500" stroke-width="1.6" stroke-linecap="round">
+        <path d="M12 3.5 21 19H3z"></path><path d="M12 10v4M12 16.6v.2"></path>
+      </svg>
+      <div>
+        <div class="gt">Speculative decoding is not free</div>
+        <div class="gb">A drafter can cost more than it saves. On this machine DSpark measured
+        <strong>43.2 t/s against 44.9 without</strong>, plus 10% slower prefill and 4&times; the
+        first-token latency &mdash; on a correctly checkpoint-matched drafter. Always benchmark
+        both ways on your own prompts before wiring one in.</div>
+      </div>
+    </div>
+
+    <div class="g">
+      <svg class="sym" viewBox="0 0 24 24" fill="none" stroke="#ff9500" stroke-width="1.6" stroke-linecap="round">
+        <path d="M12 3.5 21 19H3z"></path><path d="M12 10v4M12 16.6v.2"></path>
+      </svg>
+      <div>
+        <div class="gt">ds4 must run from its own repo root</div>
+        <div class="gb">Metal shader sources resolve relative to the working directory. Launch it from
+        anywhere else and it dies with
+        <span class="mono" style="font-size:12px;">metal backend unavailable</span> &mdash; which reads like a
+        driver problem and isn't. Use <span class="mono" style="font-size:12px;">start.cwd</span>.</div>
+      </div>
+    </div>
+
+    <div class="g">
+      <svg class="sym" viewBox="0 0 24 24" fill="none" stroke="#ff9500" stroke-width="1.6" stroke-linecap="round">
+        <path d="M12 3.5 21 19H3z"></path><path d="M12 10v4M12 16.6v.2"></path>
+      </svg>
+      <div>
+        <div class="gt">Stray clients hold backends open</div>
+        <div class="gb">A forgotten agent session in another terminal keeps a connection alive, blocks
+        the idle reaper, and quietly contends for the shared backend &mdash; showing up as a mysterious
+        stall or a halved benchmark. Check <span class="mono" style="font-size:12px;">lsof -i tcp:&lt;port&gt;</span>
+        before believing a slow number.</div>
+      </div>
+    </div>
+
+    <div class="g">
+      <svg class="sym" viewBox="0 0 24 24" fill="none" stroke="#ff9500" stroke-width="1.6" stroke-linecap="round">
+        <path d="M12 3.5 21 19H3z"></path><path d="M12 10v4M12 16.6v.2"></path>
+      </svg>
+      <div>
+        <div class="gt">Power state changes the numbers by 2&times;</div>
+        <div class="gb">On battery, or with Low Power Mode on, GPU throughput roughly halves &mdash;
+        the same config measured 44 t/s on mains and 20 t/s unplugged. Check
+        <span class="mono" style="font-size:12px;">pmset -g batt</span> and
+        <span class="mono" style="font-size:12px;">pmset -g | grep powermode</span> before recording any result.</div>
+      </div>
+    </div>
+
+    <div class="g">
+      <svg class="sym" viewBox="0 0 24 24" fill="none" stroke="#8e8e93" stroke-width="1.6" stroke-linecap="round">
+        <circle cx="12" cy="12" r="9"></circle><path d="M12 8.2v.2M12 11v5"></path>
+      </svg>
+      <div>
+        <div class="gt">Shared log files hide the real error</div>
+        <div class="gb">Models on one backend share a <span class="mono" style="font-size:12px;">logPath</span>,
+        and failure reporting reads from a byte offset. A start that dies instantly &mdash;
+        <span class="mono" style="font-size:12px;">couldn't bind HTTP server socket</span>, say &mdash; can surface as
+        a bare &ldquo;Server exited during startup&rdquo;. Run the argv by hand to see what actually happened.</div>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

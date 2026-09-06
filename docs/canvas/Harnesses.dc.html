@@ -1,0 +1,126 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #fbfbfd;
+      font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+      color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+    a { color: #0071e3; text-decoration: none; } a:hover { color: #0058b0; }
+    .sec { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+    .sec span { font-size: 10px; font-weight: 800; letter-spacing: 0.9px;
+      color: rgba(60,60,67,0.6); text-transform: uppercase; white-space: nowrap; }
+    .sec i { flex: 1; height: 1px; background: rgba(0,0,0,0.08); }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-variant-numeric: tabular-nums; }
+    .card { background: #fff; border: 1px solid rgba(0,0,0,0.07);
+      border-radius: 10px; padding: 16px 18px; }
+  </style>
+</helmet>
+
+<div style="padding: 40px 44px 44px; display: flex; flex-direction: column; gap: 24px;">
+
+  <div>
+    <h2 style="margin: 0 0 6px; font-size: 23px; font-weight: 700; letter-spacing: -0.3px;">Harnesses</h2>
+    <p style="margin: 0; font-size: 14px; line-height: 1.55; color: rgba(60,60,67,0.75); max-width: 62ch;">
+      Picking a model in the menu writes that harness's own config. The point is that adding a
+      model to the manifest is enough &mdash; it no longer means hand-editing six files.
+    </p>
+  </div>
+
+  <div>
+    <div class="sec"><span>Each speaks a different wire format</span><i></i></div>
+    <div class="card" style="padding: 0; overflow: hidden;">
+      <div style="display: grid; grid-template-columns: 118px 1.15fr 1fr; padding: 10px 18px;
+                  background: rgba(0,0,0,0.025); font-size: 10px; font-weight: 800;
+                  letter-spacing: 0.7px; color: rgba(60,60,67,0.6); text-transform: uppercase;">
+        <div>Harness</div><div>Requires</div><div>Written to</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 118px 1.15fr 1fr; padding: 11px 18px;
+                  border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div style="font-size: 12.8px; font-weight: 600;">Hermes</div>
+        <div class="mono" style="font-size: 11.5px;">/v1/chat/completions</div>
+        <div class="mono" style="font-size: 11.5px; color: rgba(60,60,67,0.7);">~/.hermes/config.yaml</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 118px 1.15fr 1fr; padding: 11px 18px;
+                  border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div style="font-size: 12.8px; font-weight: 600;">Pi</div>
+        <div class="mono" style="font-size: 11.5px;">/v1/chat/completions</div>
+        <div class="mono" style="font-size: 11.5px; color: rgba(60,60,67,0.7);">~/.pi/agent/{models,settings}.json</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 118px 1.15fr 1fr; padding: 11px 18px;
+                  border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div style="font-size: 12.8px; font-weight: 600;">Codex</div>
+        <div class="mono" style="font-size: 11.5px;">/v1/responses</div>
+        <div class="mono" style="font-size: 11.5px; color: rgba(60,60,67,0.7);">~/.codex/&lt;profile&gt;.config.toml</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 118px 1.15fr 1fr; padding: 11px 18px;
+                  border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div style="font-size: 12.8px; font-weight: 600;">Claude Code</div>
+        <div class="mono" style="font-size: 11.5px;">/v1/messages</div>
+        <div class="mono" style="font-size: 11.5px; color: rgba(60,60,67,0.7);">claude-local-model.env</div>
+      </div>
+    </div>
+    <p style="margin: 10px 2px 0; font-size: 12.5px; line-height: 1.55; color: rgba(60,60,67,0.7);">
+      A model whose backend doesn't serve the required format stays visible but disabled, with the
+      reason attached. No amount of config writing fixes a protocol mismatch &mdash; it just relocates
+      the failure to the first request.
+    </p>
+  </div>
+
+  <div>
+    <div class="sec"><span>Registration, then the pointer</span><i></i></div>
+    <p style="margin: 0; font-size: 13.5px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      Always in that order, and the pointer only moves if registration succeeded &mdash; pointing a
+      harness at a provider it has no definition for is exactly the broken state this prevents.
+      Registration is idempotent: selecting a model that is already defined rewrites its
+      definition to match the manifest rather than appending a duplicate.
+    </p>
+  </div>
+
+  <div class="card" style="border-left: 3px solid #ff3b30;">
+    <div style="font-size: 13px; font-weight: 700; margin-bottom: 8px;">Claude Code is deliberately different</div>
+    <p style="margin: 0 0 10px; font-size: 13.5px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      Nothing here ever writes <span class="mono" style="font-size:12px;">~/.claude/settings.json</span> or
+      changes what a bare <span class="mono" style="font-size:12px;">claude</span> does. The local model is
+      armed only through a small env file that the <span class="mono" style="font-size:12px;">claude-local</span>
+      wrapper reads, scoped to that one invocation.
+    </p>
+    <p style="margin: 0; font-size: 13.5px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      That boundary is load-bearing rather than stylistic: a global redirect would hijack every
+      Claude Code session on the machine &mdash; including the one doing the work.
+    </p>
+  </div>
+
+  <div class="card" style="border-left: 3px solid #ff9500;">
+    <div style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">Two Codex landmines</div>
+    <p style="margin: 0; font-size: 13.5px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      Some provider ids are reserved built-ins &mdash; redefining
+      <span class="mono" style="font-size:12px;">ollama</span> makes Codex reject the whole config, breaking
+      even unrelated invocations, so reserved names get a
+      <span class="mono" style="font-size:12px;">-local</span> suffix automatically. And
+      <span class="mono" style="font-size:12px;">wire_api</span> must be
+      <span class="mono" style="font-size:12px;">"responses"</span>;
+      <span class="mono" style="font-size:12px;">"chat"</span> was removed in Codex 0.148.
+    </p>
+  </div>
+
+  <div>
+    <div class="sec"><span>Writes are atomic</span><i></i></div>
+    <p style="margin: 0; font-size: 13.5px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      Every config write goes to a temp file in the same directory and is renamed into place, with
+      one dotfile backup kept beside the original. It's a dotfile on purpose: some of these live in
+      directories a backend scans for its own configs, where a visible sibling gets picked up as a
+      bogus model entry.
+    </p>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

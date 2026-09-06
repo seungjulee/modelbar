@@ -1,0 +1,35 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",      "x": 0,    "y": 0,    "w": 900, "h": 1010 },
+    { "file": "Proxy.dc.html",     "x": 1000, "y": 0,    "w": 900, "h": 1180 },
+    { "file": "Memory.dc.html",    "x": 2000, "y": 0,    "w": 900, "h": 1260 },
+    { "file": "Manifest.dc.html",  "x": 0,    "y": 1420, "w": 900, "h": 1310 },
+    { "file": "CLI.dc.html",       "x": 1000, "y": 1420, "w": 900, "h": 1080 },
+    { "file": "Harnesses.dc.html", "x": 2000, "y": 1420, "w": 900, "h": 1230 },
+    { "file": "Gotchas.dc.html",   "x": 1000, "y": 2880, "w": 900, "h": 1150 }
+  ],
+  "annotations": [
+    {
+      "id": "read-order",
+      "x": -300,
+      "y": 0,
+      "w": 240,
+      "text": "Start at Overview, then Proxy — those two explain why everything else is shaped the way it is.\n\nMemory is the one worth reading before you trust any number the machine reports."
+    },
+    {
+      "id": "reference-row",
+      "x": -300,
+      "y": 1420,
+      "w": 240,
+      "text": "Reference row: manifest schema, CLI, and how harness selection writes config."
+    },
+    {
+      "id": "gotchas-note",
+      "x": -300,
+      "y": 2880,
+      "w": 240,
+      "text": "Every failure mode here was hit for real. They share a shape: something silently disagrees with what the config says."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

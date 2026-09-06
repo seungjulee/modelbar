@@ -1,0 +1,137 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #fbfbfd;
+      font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+      color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+    a { color: #0071e3; text-decoration: none; } a:hover { color: #0058b0; }
+    .sec { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+    .sec span { font-size: 10px; font-weight: 800; letter-spacing: 0.9px;
+      color: rgba(60,60,67,0.6); text-transform: uppercase; white-space: nowrap; }
+    .sec i { flex: 1; height: 1px; background: rgba(0,0,0,0.08); }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-variant-numeric: tabular-nums; }
+    .card { background: #fff; border: 1px solid rgba(0,0,0,0.07);
+      border-radius: 10px; padding: 16px 18px; }
+    .step { display: flex; gap: 14px; align-items: flex-start; }
+    .num { width: 22px; height: 22px; border-radius: 50%; flex: none;
+      background: #1d1d1f; color: #fff; font-size: 11px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center; margin-top: 1px; }
+  </style>
+</helmet>
+
+<div style="padding: 40px 44px 44px; display: flex; flex-direction: column; gap: 26px;">
+
+  <div>
+    <h2 style="margin: 0 0 6px; font-size: 23px; font-weight: 700; letter-spacing: -0.3px;">The proxy</h2>
+    <p style="margin: 0; font-size: 14px; line-height: 1.55; color: rgba(60,60,67,0.75); max-width: 62ch;">
+      A TCP-level splice, not an HTTP proxy. Working at the byte level means streaming (SSE),
+      chunked encoding and keep-alive all just work, because none of it is interpreted.
+    </p>
+  </div>
+
+  <div class="card" style="background: #1d1d1f; border: none; color: #f5f5f7;">
+    <div class="mono" style="font-size: 12.5px; line-height: 1.9;">
+      <div style="color: rgba(245,245,247,0.55);">client                    ModelBar                   real backend</div>
+      <div style="height: 6px;"></div>
+      <div>curl :8000&nbsp; &rarr;&nbsp; <span style="color:#5ac8fa;">publicPort 8000</span>&nbsp; &rarr;&nbsp; <span style="color:#34c759;">port 8100</span>&nbsp; ds4-server</div>
+      <div>Hermes :8081&nbsp;&rarr;&nbsp; <span style="color:#5ac8fa;">publicPort 8081</span>&nbsp; &rarr;&nbsp; <span style="color:#34c759;">port 8181</span>&nbsp; mlx-dspark</div>
+      <div style="height: 8px;"></div>
+      <div style="color: rgba(245,245,247,0.55);">clients only ever see the public port; the internal one is never exposed</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="sec"><span>What happens on a connection</span><i></i></div>
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+
+      <div class="step">
+        <div class="num">1</div>
+        <div style="font-size: 13.5px; line-height: 1.55;">
+          <strong>Probe the internal port</strong> (0.6&nbsp;s). If the backend answers, splice
+          the two sockets and copy bytes until either side closes. Warm traffic never gets
+          inspected &mdash; this path is untouched.
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="num">2</div>
+        <div style="font-size: 13.5px; line-height: 1.55;">
+          <strong>Cold: read the first request line.</strong> A bare TCP connect is not a
+          reason to load 84&nbsp;GB. Only requests that genuinely need weights wake anything.
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="num">3</div>
+        <div style="font-size: 13.5px; line-height: 1.55;">
+          <strong>Spawn and await health</strong>, holding the client open. Then splice,
+          replaying the bytes already read so the backend sees the request exactly as sent.
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div>
+    <div class="sec"><span>Wake / don't wake</span><i></i></div>
+    <div class="card" style="padding: 0; overflow: hidden;">
+      <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 0;
+                  padding: 10px 18px; background: rgba(0,0,0,0.025);
+                  font-size: 10px; font-weight: 800; letter-spacing: 0.7px;
+                  color: rgba(60,60,67,0.6); text-transform: uppercase;">
+        <div>Request</div><div>Result</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 0;
+                  padding: 11px 18px; border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div class="mono" style="font-size: 12px;">POST /v1/chat/completions</div>
+        <div style="font-size: 12.5px; color: #34c759; font-weight: 600;">starts the backend</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 0;
+                  padding: 11px 18px; border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div class="mono" style="font-size: 12px;">/responses &middot; /messages &middot; /embeddings</div>
+        <div style="font-size: 12.5px; color: #34c759; font-weight: 600;">starts the backend</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 0;
+                  padding: 11px 18px; border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div class="mono" style="font-size: 12px;">GET /v1/models</div>
+        <div style="font-size: 12.5px; color: rgba(60,60,67,0.7);">lists the model that would start</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 0;
+                  padding: 11px 18px; border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div class="mono" style="font-size: 12px;">OPTIONS &middot; GET /health</div>
+        <div style="font-size: 12.5px; color: rgba(60,60,67,0.7);">204 / 503 &ldquo;asleep&rdquo;</div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 0;
+                  padding: 11px 18px; border-top: 1px solid rgba(0,0,0,0.06); align-items: center;">
+        <div class="mono" style="font-size: 12px;">connect, send nothing</div>
+        <div style="font-size: 12.5px; color: rgba(60,60,67,0.7);">closed, nothing woken</div>
+      </div>
+    </div>
+    <p style="margin: 10px 2px 0; font-size: 12.5px; line-height: 1.55; color: rgba(60,60,67,0.7);">
+      This exists because harnesses enumerate their providers at startup. Launching Hermes
+      touched the ds4 port and silently loaded DeepSeek &mdash; even with a different model selected.
+    </p>
+  </div>
+
+  <div>
+    <div class="sec"><span>Idle reaping</span><i></i></div>
+    <p style="margin: 0; font-size: 13.5px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      A backend is stopped after its <span class="mono" style="font-size:12.5px;">sleepIdleSeconds</span>
+      with no live connections. The gate is the <strong>open-connection count</strong>, not a
+      timestamp &mdash; a long generation with one attached client is never reaped mid-answer.
+      On quit, every proxy stops the backend it started, including one caught mid-launch.
+    </p>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

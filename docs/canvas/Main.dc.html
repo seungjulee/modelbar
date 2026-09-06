@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #fbfbfd;
+      font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+      color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+    a { color: #0071e3; text-decoration: none; } a:hover { color: #0058b0; }
+    .sec { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
+    .sec span { font-size: 10px; font-weight: 800; letter-spacing: 0.9px;
+      color: rgba(60,60,67,0.6); text-transform: uppercase; white-space: nowrap; }
+    .sec i { flex: 1; height: 1px; background: rgba(0,0,0,0.08); }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-variant-numeric: tabular-nums; }
+    .card { background: #fff; border: 1px solid rgba(0,0,0,0.07);
+      border-radius: 10px; padding: 18px 20px; }
+  </style>
+</helmet>
+
+<div style="padding: 44px 48px 48px; display: flex; flex-direction: column; gap: 30px;">
+
+  <div style="display: flex; align-items: flex-start; gap: 16px;">
+    <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#1d1d1f"
+         stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"
+         style="margin-top: 3px;">
+      <rect x="4" y="4" width="16" height="16" rx="2.5"></rect>
+      <rect x="8.5" y="8.5" width="7" height="7" rx="1"></rect>
+      <path d="M9 1.8v2.2M15 1.8v2.2M9 20v2.2M15 20v2.2M1.8 9h2.2M1.8 15h2.2M20 9h2.2M20 15h2.2"></path>
+    </svg>
+    <div style="flex: 1;">
+      <h1 style="margin: 0 0 6px; font-size: 30px; font-weight: 700; letter-spacing: -0.5px;">ModelBar</h1>
+      <p style="margin: 0; font-size: 15px; line-height: 1.5; color: rgba(60,60,67,0.75); max-width: 60ch;">
+        A menubar manager for local LLM backends on Apple Silicon. It owns the ports your
+        clients already point at, so a model starts on the first real request and stops
+        when nothing is using it.
+      </p>
+    </div>
+  </div>
+
+  <div class="card" style="border-left: 3px solid #34c759;">
+    <div style="font-size: 13px; font-weight: 700; margin-bottom: 8px;">The one idea</div>
+    <p style="margin: 0; font-size: 14px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      An 84&nbsp;GB model takes ~30&nbsp;s to load and holds memory until something kills it.
+      Rather than leaving it resident, ModelBar binds the <strong>public</strong> port itself
+      and keeps the client's connection open through the cold start. From the client's side
+      that looks like one slow first response &mdash; which is the whole trick.
+    </p>
+  </div>
+
+  <div>
+    <div class="sec"><span>What the menu shows</span><i></i></div>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;">
+      <div class="card">
+        <div style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">Memory</div>
+        <div style="font-size: 13px; line-height: 1.55; color: rgba(60,60,67,0.75);">
+          RAM, GPU wired cap, swap trend &mdash; plus an attribution line naming which model
+          the memory belongs to.
+        </div>
+      </div>
+      <div class="card">
+        <div style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">Models</div>
+        <div style="font-size: 13px; line-height: 1.55; color: rgba(60,60,67,0.75);">
+          Every manifest entry with its backend, size and load state. Click to load;
+          hover for Restart, Stop and the context picker.
+        </div>
+      </div>
+      <div class="card">
+        <div style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">Backends &amp; Processes</div>
+        <div style="font-size: 13px; line-height: 1.55; color: rgba(60,60,67,0.75);">
+          Port health, served model, live telemetry; and the real processes with
+          footprint, CPU and uptime.
+        </div>
+      </div>
+      <div class="card">
+        <div style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">Harnesses</div>
+        <div style="font-size: 13px; line-height: 1.55; color: rgba(60,60,67,0.75);">
+          Point Hermes, Pi, Codex or Claude Code at any eligible model. Selecting one
+          writes that harness's config &mdash; nothing else touches those files.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="sec"><span>Status colours mean one thing everywhere</span><i></i></div>
+    <div style="display: flex; gap: 26px; flex-wrap: wrap; align-items: center;">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="width: 9px; height: 9px; border-radius: 50%; background: #34c759; display: inline-block;"></span>
+        <span style="font-size: 13px;">up &middot; under 70% &middot; healthy</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="width: 9px; height: 9px; border-radius: 50%; background: #ff9500; display: inline-block;"></span>
+        <span style="font-size: 13px;">70&ndash;90% &middot; getting tight</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="width: 9px; height: 9px; border-radius: 50%; background: #ff3b30; display: inline-block;"></span>
+        <span style="font-size: 13px;">90%+ &middot; about to hurt</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="width: 9px; height: 9px; border-radius: 50%; background: #007aff; display: inline-block;"></span>
+        <span style="font-size: 13px;">service-managed &mdash; never stopped by ModelBar</span>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="sec"><span>Layout of the system</span><i></i></div>
+    <div class="card mono" style="font-size: 12.5px; line-height: 2; color: rgba(60,60,67,0.9);">
+      <div><span style="color:#0071e3;">~/models/modelbar.json</span>&nbsp;&nbsp;the manifest &mdash; single source of truth</div>
+      <div><span style="color:#0071e3;">/Applications/ModelBar.app</span>&nbsp;&nbsp;menubar app + <span style="color:#1d1d1f;">--cli</span> in one binary</div>
+      <div><span style="color:#0071e3;">~/models/gguf/</span>, <span style="color:#0071e3;">~/models/mlx/</span>&nbsp;&nbsp;weights</div>
+      <div><span style="color:#0071e3;">~/models/scripts/</span>&nbsp;&nbsp;harness wrappers ModelBar writes</div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

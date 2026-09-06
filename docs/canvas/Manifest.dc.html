@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #fbfbfd;
+      font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+      color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+    a { color: #0071e3; text-decoration: none; } a:hover { color: #0058b0; }
+    .sec { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+    .sec span { font-size: 10px; font-weight: 800; letter-spacing: 0.9px;
+      color: rgba(60,60,67,0.6); text-transform: uppercase; white-space: nowrap; }
+    .sec i { flex: 1; height: 1px; background: rgba(0,0,0,0.08); }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-variant-numeric: tabular-nums; }
+    .card { background: #fff; border: 1px solid rgba(0,0,0,0.07);
+      border-radius: 10px; padding: 16px 18px; }
+    .row { display: grid; grid-template-columns: 190px 1fr; gap: 14px;
+      padding: 9px 0; border-top: 1px solid rgba(0,0,0,0.06); align-items: baseline; }
+    .k { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: #0071e3; }
+    .v { font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8); }
+  </style>
+</helmet>
+
+<div style="padding: 40px 44px 44px; display: flex; flex-direction: column; gap: 24px;">
+
+  <div>
+    <h2 style="margin: 0 0 6px; font-size: 23px; font-weight: 700; letter-spacing: -0.3px;">The manifest</h2>
+    <p style="margin: 0; font-size: 14px; line-height: 1.55; color: rgba(60,60,67,0.75); max-width: 62ch;">
+      <span class="mono" style="font-size: 13px;">~/models/modelbar.json</span> &mdash;
+      the single source of truth. Adding a model here is enough to make it loadable,
+      selectable in every harness it can drive, and accounted for in the memory budget.
+    </p>
+  </div>
+
+  <div>
+    <div class="sec"><span>backends[]</span><i></i></div>
+    <div class="card" style="padding: 4px 18px 12px;">
+      <div class="row" style="border-top: none;"><div class="k">id</div><div class="v">Stable key. Models reference it; harness provider keys default to it.</div></div>
+      <div class="row"><div class="k">port</div><div class="v">Where the real server listens. For a proxied backend this is <strong>internal</strong> and never given to clients.</div></div>
+      <div class="row"><div class="k">publicPort</div><div class="v">Present &rArr; on-demand. ModelBar binds this one and owns the process lifecycle behind it.</div></div>
+      <div class="row"><div class="k">managed</div><div class="v"><span class="mono" style="font-size:11.5px;">false</span> marks a service ModelBar must never stop (Ollama is a launchd job).</div></div>
+      <div class="row"><div class="k">apis</div><div class="v">Wire formats actually served: <span class="mono" style="font-size:11.5px;">chat</span>, <span class="mono" style="font-size:11.5px;">responses</span>, <span class="mono" style="font-size:11.5px;">messages</span>. This gates harness eligibility.</div></div>
+      <div class="row"><div class="k">telemetry.kind</div><div class="v">Which parser reads live stats: <span class="mono" style="font-size:11.5px;">ds4 · llamacpp · ollama · comfyui · localai · none</span>.</div></div>
+      <div class="row"><div class="k">process</div><div class="v"><span class="mono" style="font-size:11.5px;">any</span> matches the program identity (exec path + argv[0]) &mdash; not the whole command line.</div></div>
+      <div class="row"><div class="k">memoryAccounting</div><div class="v"><span class="mono" style="font-size:11.5px;">nominal</span> (default) charges the declared size; <span class="mono" style="font-size:11.5px;">measured</span> charges real footprint.</div></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="sec"><span>models[]</span><i></i></div>
+    <div class="card" style="padding: 4px 18px 12px;">
+      <div class="row" style="border-top: none;"><div class="k">servedName</div><div class="v">Must match what the backend reports as loaded. A mismatch shows the model as &ldquo;not loaded&rdquo; while it is plainly running.</div></div>
+      <div class="row"><div class="k">estimatedGB</div><div class="v">Declared resident size. Drives the budget guard and the memory attribution.</div></div>
+      <div class="row"><div class="k">requires[]</div><div class="v">Files that must exist. Missing &rArr; the row is greyed with the filename, and it cannot be selected in a harness.</div></div>
+      <div class="row"><div class="k">start.argv</div><div class="v">Exact launch command, argv array &mdash; never a shell string, so nothing can be re-split or injected.</div></div>
+      <div class="row"><div class="k">context</div><div class="v"><span class="mono" style="font-size:11.5px;">flag</span> + <span class="mono" style="font-size:11.5px;">options[]</span> + <span class="mono" style="font-size:11.5px;">defaultSize</span>. Restart-to-apply; the picker prices each rung against the budget.</div></div>
+      <div class="row"><div class="k">harness.apiName</div><div class="v">The string a client puts in the request body's <span class="mono" style="font-size:11.5px;">model</span> field. Often not the id and not <span class="mono" style="font-size:11.5px;">servedName</span>.</div></div>
+      <div class="row"><div class="k">sleepIdleSeconds</div><div class="v">Idle timeout before a proxied backend is stopped. Only meaningful with a <span class="mono" style="font-size:11.5px;">publicPort</span>.</div></div>
+      <div class="row"><div class="k">metadataPath</div><div class="v">Explicit config.json / .gguf for reading the trained context ceiling and KV cost, when <span class="mono" style="font-size:11.5px;">requires</span> doesn't name one.</div></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="sec"><span>Validation catches these</span><i></i></div>
+    <div class="card mono" style="font-size: 12px; line-height: 1.95; color: rgba(60,60,67,0.85);">
+      <div>! duplicate backend / model id</div>
+      <div>! model references unknown backend</div>
+      <div>! port claimed by two backends</div>
+      <div>! publicPort equal to port &mdash; the proxy would forward to itself</div>
+      <div>! out-of-range port &middot; empty start.argv &middot; missing required file</div>
+      <div style="height: 6px;"></div>
+      <div style="color: rgba(60,60,67,0.6);">$ ModelBar --cli validate</div>
+    </div>
+  </div>
+
+  <div class="card" style="border-left: 3px solid #ff3b30;">
+    <div style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">The manifest is not hot-reloaded</div>
+    <p style="margin: 0; font-size: 13.5px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      Editing the file has no effect on the running app until it is fully quit and relaunched.
+      And quitting stops every backend a proxy is holding &mdash; so a manifest edit can restart
+      a model somebody is mid-conversation with. Check what is loaded first.
+    </p>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #fbfbfd;
+      font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+      color: #1d1d1f; -webkit-font-smoothing: antialiased; }
+    a { color: #0071e3; text-decoration: none; } a:hover { color: #0058b0; }
+    .sec { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+    .sec span { font-size: 10px; font-weight: 800; letter-spacing: 0.9px;
+      color: rgba(60,60,67,0.6); text-transform: uppercase; white-space: nowrap; }
+    .sec i { flex: 1; height: 1px; background: rgba(0,0,0,0.08); }
+    .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-variant-numeric: tabular-nums; }
+    .card { background: #fff; border: 1px solid rgba(0,0,0,0.07);
+      border-radius: 10px; padding: 16px 18px; }
+    .cmd { display: grid; grid-template-columns: 250px 1fr; gap: 14px;
+      padding: 10px 0; border-top: 1px solid rgba(0,0,0,0.06); align-items: baseline; }
+  </style>
+</helmet>
+
+<div style="padding: 40px 44px 44px; display: flex; flex-direction: column; gap: 24px;">
+
+  <div>
+    <h2 style="margin: 0 0 6px; font-size: 23px; font-weight: 700; letter-spacing: -0.3px;">Command line</h2>
+    <p style="margin: 0; font-size: 14px; line-height: 1.55; color: rgba(60,60,67,0.75); max-width: 62ch;">
+      One binary, two front ends. Every subcommand drives the same state the menu does, so
+      anything scriptable is testable from a terminal &mdash; the menubar cannot be driven
+      programmatically.
+    </p>
+  </div>
+
+  <div class="card mono" style="background: #1d1d1f; border: none; color: #f5f5f7; font-size: 12.5px; line-height: 1.7;">
+    /Applications/ModelBar.app/Contents/MacOS/ModelBar --cli &lt;command&gt;
+  </div>
+
+  <div>
+    <div class="sec"><span>Commands</span><i></i></div>
+    <div class="card" style="padding: 4px 18px 12px;">
+      <div class="cmd" style="border-top: none;">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">validate</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">Parse the manifest, list warnings, check every referenced path exists.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">status</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">Backend health, served model, live telemetry, loaded models, committed GB.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">monitor</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">One-shot htop-style snapshot. Takes two samples &mdash; %CPU is a delta.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">start &lt;model-id&gt;</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">Free the port, launch, wait for health. Prints the failing log lines if it doesn't come up.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">stop &lt;model-id&gt;</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">SIGTERM, escalating to SIGKILL after the grace period.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">context &lt;model-id&gt; &lt;n&gt;</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">Set the context window used on the next load. Rejects sizes outside the model's ladder.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">discover</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">Models on disk or in a backend's inventory that no manifest entry references.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">harness show</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">What Hermes, Pi, Codex and Claude Code currently point at.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">harness set &lt;h&gt; &lt;model|api&gt;</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);"><span class="mono" style="font-size:11.5px;">hermes | pi | codex | claude</span>. Registers the model, then moves the pointer &mdash; never the other way round.</div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="sec"><span>Flags</span><i></i></div>
+    <div class="card" style="padding: 4px 18px 12px;">
+      <div class="cmd" style="border-top: none;">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">--manifest &lt;path&gt;</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">Use a scratch manifest. Works in GUI mode too, and redirects <em>every</em> config write &mdash; including Codex profile files.</div>
+      </div>
+      <div class="cmd">
+        <div class="mono" style="font-size: 12px; color: #0071e3;">--force</div>
+        <div style="font-size: 12.8px; line-height: 1.5; color: rgba(60,60,67,0.8);">Permit an over-budget load. Without it the CLI refuses rather than thrashing into swap.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="border-left: 3px solid #ff9500;">
+    <div style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">CLI and app don't share state</div>
+    <p style="margin: 0; font-size: 13.5px; line-height: 1.6; color: rgba(60,60,67,0.85);">
+      The installed app and a directly-run binary use <strong>different preference domains</strong>
+      (<span class="mono" style="font-size:12px;">com.sj.modelbar</span> vs
+      <span class="mono" style="font-size:12px;">ModelBar</span>). A context size set via one is
+      invisible to the other. Prefer the installed path
+      (<span class="mono" style="font-size:12px;">/Applications/ModelBar.app/…/ModelBar --cli</span>)
+      so the GUI sees what you set.
+    </p>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>
