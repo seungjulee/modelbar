@@ -121,6 +121,9 @@ final class AppState {
     private var contextSelection: [String: Int] = [:]
     /// The manifest `defaultSize` in force when each pick was made.
     private var contextBaseline: [String: Int] = [:]
+    private var manifestWatch: DispatchSourceFileSystemObject?
+    private var manifestReloadWork: DispatchWorkItem?
+    private var lastManifestStamp: String = ""
 
     private static let lastStartedKey = "ModelBar.lastStartedByPort"
     private static let contextSelectionKey = "ModelBar.contextSelection"
@@ -353,6 +356,60 @@ final class AppState {
             manifestWarnings = []
             manifestError = error.localizedDescription
         }
+    }
+
+    /// Reloads the manifest whenever the file on disk changes.
+    ///
+    /// Without this the manifest is read once at launch and then only when
+    /// someone clicks "Reload Manifest" — so a model added by the CLI stayed
+    /// invisible in a running app, which is exactly how `discover --add` and a
+    /// hand-edited entry both went unnoticed for days. Anything that edits the
+    /// manifest should show up on its own; needing to know about a hidden menu
+    /// item is not a reasonable thing to expect.
+    ///
+    /// Watches the containing directory rather than the file. Every writer here
+    /// saves atomically — write a temp file, rename it into place — which
+    /// replaces the inode, so a watch on the file itself sees one deletion and
+    /// then nothing at all.
+    func startWatchingManifest() {
+        manifestWatch?.cancel()
+        let dir = (manifestPath as NSString).deletingLastPathComponent
+        let fd = open(dir, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: [.write, .delete, .rename, .attrib],
+            queue: .main)
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
+            // An atomic save is several events in quick succession, and the
+            // window between the rename and the final size is where a partial
+            // read would happen. Coalescing on a short delay reads once, after.
+            self.manifestReloadWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                let stamp = self.manifestStamp()
+                guard stamp != self.lastManifestStamp else { return }
+                self.lastManifestStamp = stamp
+                self.reloadManifest()
+                self.dropStaleContextPicks()
+                Task { await self.refresh() }
+            }
+            self.manifestReloadWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+        }
+        src.setCancelHandler { close(fd) }
+        lastManifestStamp = manifestStamp()
+        src.resume()
+        manifestWatch = src
+    }
+
+    /// Size + mtime, enough to tell a real change from an unrelated event in
+    /// the same directory — `~/models` also holds the weights themselves.
+    private func manifestStamp() -> String {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: manifestPath)
+        let size = (attrs?[.size] as? NSNumber)?.intValue ?? -1
+        let mod = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+        return "\(size):\(mod)"
     }
 
     var backends: [BackendSpec] { manifest?.backends ?? [] }

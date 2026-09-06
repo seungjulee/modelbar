@@ -170,6 +170,7 @@ struct ModelBarApp: App {
             }
             .onAppear {
                 state.startPolling()
+                state.startWatchingManifest()
                 state.startProxies()
                 appDelegate.state = state
             }
