@@ -99,7 +99,9 @@ enum CLI {
         for model in state.models {
             let missing = model.missingRequirements
             missingTotal += missing.count
-            let mark = missing.isEmpty ? "OK  " : "MISS"
+            // A draft is "OK" in the sense that its files are present, which is
+            // exactly the misreading worth preventing: it still cannot start.
+            let mark = !missing.isEmpty ? "MISS" : (model.draft ? "DRFT" : "OK  ")
             print("  [\(mark)] " + Fmt.pad(model.displayName, 44)
                   + Fmt.pad(model.backendId, 10)
                   + Fmt.pad(":\(model.port)", 7)
