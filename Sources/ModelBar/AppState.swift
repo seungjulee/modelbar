@@ -119,23 +119,94 @@ final class AppState {
     /// backend takes context as a restart-time launch flag. Persisted so a
     /// choice survives an idle-stop/auto-restart cycle.
     private var contextSelection: [String: Int] = [:]
+    /// The manifest `defaultSize` in force when each pick was made.
+    private var contextBaseline: [String: Int] = [:]
 
     private static let lastStartedKey = "ModelBar.lastStartedByPort"
     private static let contextSelectionKey = "ModelBar.contextSelection"
+    /// Remembers the manifest default each pick was made against, so a pick can
+    /// be told apart from a default that has since moved. See `dropStaleContextPicks`.
+    private static let contextBaselineKey = "ModelBar.contextSelectionBaseline"
+
+    /// Where preferences live.
+    ///
+    /// Explicit rather than `.standard`, because `.standard` is keyed on the
+    /// running bundle: the installed app writes `com.sj.modelbar` while the same
+    /// binary run straight from a build directory writes `ModelBar`. That split
+    /// is invisible and produces a genuinely confusing failure — a context size
+    /// set through the CLI that the menubar app never sees, or vice versa, with
+    /// each insisting it holds the right value. One named suite means both
+    /// front ends read and write the same store.
+    static let defaultsSuiteName = "com.sj.modelbar.shared"
+    static let defaults: UserDefaults =
+        UserDefaults(suiteName: defaultsSuiteName) ?? .standard
 
     init(manifestPath: String? = nil) {
         if let manifestPath { self.manifestPath = manifestPath }
-        if let stored = UserDefaults.standard.dictionary(forKey: Self.lastStartedKey)
+        Self.migrateLegacyDefaults()
+        if let stored = Self.defaults.dictionary(forKey: Self.lastStartedKey)
             as? [String: String] {
             for (k, v) in stored {
                 if let port = Int(k) { lastStartedByPort[port] = v }
             }
         }
-        if let stored = UserDefaults.standard.dictionary(forKey: Self.contextSelectionKey)
-            as? [String: Int] {
-            contextSelection = stored
-        }
+        contextSelection = Self.defaults.dictionary(forKey: Self.contextSelectionKey)
+            as? [String: Int] ?? [:]
+        contextBaseline = Self.defaults.dictionary(forKey: Self.contextBaselineKey)
+            as? [String: Int] ?? [:]
         reloadManifest()
+        dropStaleContextPicks()
+    }
+
+    /// Copies preferences written by an older build into the shared suite.
+    ///
+    /// Runs once. Before the shared suite existed, the same binary wrote to two
+    /// different domains depending on how it was launched, so both are folded in
+    /// — the app bundle's first, since that is the one a user's clicks produced.
+    private static func migrateLegacyDefaults() {
+        let migratedKey = "ModelBar.migratedToSharedSuite"
+        guard !defaults.bool(forKey: migratedKey) else { return }
+        for domain in ["com.sj.modelbar", "ModelBar"] {
+            guard let legacy = UserDefaults(suiteName: domain) else { continue }
+            for key in [lastStartedKey, contextSelectionKey] {
+                guard defaults.dictionary(forKey: key) == nil,
+                      let value = legacy.dictionary(forKey: key), !value.isEmpty else { continue }
+                defaults.set(value, forKey: key)
+            }
+        }
+        defaults.set(true, forKey: migratedKey)
+    }
+
+    /// Forgets a context pick whose manifest default has moved since.
+    ///
+    /// A pick is meant to outlive an idle-stop, not to outrank a deliberate edit
+    /// to the manifest. Without this the two disagree silently and the manifest
+    /// loses: changing `defaultSize` to 65536 still launched a server at the
+    /// 131072 someone chose days earlier — the exact size that had overrun the
+    /// GPU's wired cap. A pick made against a default that no longer exists is
+    /// stale by definition, so it is dropped and the new default applies.
+    private func dropStaleContextPicks() {
+        guard manifest != nil else { return }
+        var dropped: [String] = []
+        for model in models {
+            guard let current = model.context?.defaultSize, current > 0 else { continue }
+            guard contextSelection[model.id] != nil else { continue }
+            // No baseline means the pick predates this bookkeeping; adopt the
+            // current default as its baseline rather than discarding a real choice.
+            guard let baseline = contextBaseline[model.id] else {
+                contextBaseline[model.id] = current
+                continue
+            }
+            if baseline != current {
+                contextSelection.removeValue(forKey: model.id)
+                contextBaseline[model.id] = current
+                dropped.append(model.displayName)
+            }
+        }
+        guard !dropped.isEmpty else { return }
+        Self.defaults.set(contextSelection, forKey: Self.contextSelectionKey)
+        Self.defaults.set(contextBaseline, forKey: Self.contextBaselineKey)
+        note("Context reset to the manifest default for " + dropped.joined(separator: ", "))
     }
 
     // MARK: - Context selection
@@ -190,7 +261,9 @@ final class AppState {
     func setContextSize(_ size: Int, for model: ModelSpec) {
         guard let ctx = model.context, contextSizes(for: model).contains(size) else { return }
         contextSelection[model.id] = size
-        UserDefaults.standard.set(contextSelection, forKey: Self.contextSelectionKey)
+        Self.defaults.set(contextSelection, forKey: Self.contextSelectionKey)
+        contextBaseline[model.id] = ctx.defaultSize
+        Self.defaults.set(contextBaseline, forKey: Self.contextBaselineKey)
 
         // A launch-flag size is applied by `effectiveStart` at spawn time, so
         // remembering it is enough. A file-backed size has to be written now:
@@ -792,7 +865,7 @@ final class AppState {
     private func persistLastStarted() {
         var out: [String: String] = [:]
         for (port, id) in lastStartedByPort { out[String(port)] = id }
-        UserDefaults.standard.set(out, forKey: Self.lastStartedKey)
+        Self.defaults.set(out, forKey: Self.lastStartedKey)
     }
 
     // MARK: - On-demand proxies (ds4, MLX)
