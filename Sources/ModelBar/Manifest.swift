@@ -465,11 +465,19 @@ struct ModelSpec: Decodable, Sendable, Identifiable {
     /// `requires`, which is the case for a model whose manifest entry names a
     /// backend config file instead of the weights (LocalAI).
     var metadataPath: String?
+    /// Written by `discover --add`, cleared by hand once the entry is finished.
+    ///
+    /// A drafted entry knows its own size and context ceiling but not how to
+    /// launch anything, so it is inert: never auto-started, and refused with an
+    /// explanation if something asks it to run. The alternative — an entry that
+    /// looks like every other one but was never reviewed — is how an unchecked
+    /// guess ends up spawning an 80 GB process.
+    var draft: Bool = false
 
     private enum CodingKeys: String, CodingKey {
         case id, displayName, backendId, estimatedGB, port, notes, shortName, drafters
         case servedName, requires, start, stop, loadedCheck, harness, sleepIdleSeconds, context
-        case contextLength, metadataPath
+        case contextLength, metadataPath, draft
     }
 
     init(from decoder: Decoder) throws {
@@ -490,6 +498,7 @@ struct ModelSpec: Decodable, Sendable, Identifiable {
         harness = try c.decodeIfPresent(HarnessTarget.self, forKey: .harness)
         sleepIdleSeconds = try c.decodeIfPresent(Double.self, forKey: .sleepIdleSeconds)
         context = try c.decodeIfPresent(ContextOption.self, forKey: .context)
+        draft = try c.decodeIfPresent(Bool.self, forKey: .draft) ?? false
         contextLength = try c.decodeIfPresent(Int.self, forKey: .contextLength)
         metadataPath = try c.decodeIfPresent(String.self, forKey: .metadataPath)
     }

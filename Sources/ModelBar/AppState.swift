@@ -688,6 +688,19 @@ final class AppState {
             note("Busy — already \(activity.modelId.map { "working on \($0)" } ?? "working")")
             return false
         }
+        // A draft entry knows where the weights are but not how to serve them,
+        // so there is nothing safe to launch. Refusing here — rather than at the
+        // missing-requirements check below, which it would pass — is what keeps
+        // an unreviewed guess from being run as if it had been configured.
+        guard !model.draft else {
+            lastFailure = LoadFailure(
+                modelId: model.id,
+                summary: "\(model.displayName) is a draft entry — fill in start.argv "
+                       + "and remove \"draft\": true before loading it",
+                logLines: [], logPath: nil, at: Date())
+            note("\(model.displayName) is still a draft — not started")
+            return false
+        }
         guard let backend = manifest?.backend(id: model.backendId) else {
             note("Unknown backend \(model.backendId)")
             return false

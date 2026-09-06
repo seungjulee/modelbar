@@ -33,17 +33,32 @@ enum ModelGeometryReader {
     /// otherwise auto-detecting from the model's `requires` list — an MLX
     /// `config.json` or a `.gguf` is enough, and every current entry names one.
     static func read(for model: ModelSpec) -> ModelGeometry? {
-        let candidates: [String]
         if let explicit = model.metadataPath?.expandingTilde {
-            candidates = [explicit]
-        } else {
-            candidates = model.resolvedRequires
+            return read(candidates: [explicit])
         }
-        if let cfg = candidates.first(where: { $0.hasSuffix("config.json") }),
+        return read(candidates: model.resolvedRequires)
+    }
+
+    /// Same reader addressed by path, for callers that have a location but no
+    /// manifest entry yet — chiefly drafting one from a discovered model.
+    /// A directory is expanded to the `config.json` or single `.gguf` inside it.
+    static func read(candidates: [String]) -> ModelGeometry? {
+        var paths: [String] = []
+        for c in candidates {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: c, isDirectory: &isDir) else { continue }
+            guard isDir.boolValue else { paths.append(c); continue }
+            let cfg = (c as NSString).appendingPathComponent("config.json")
+            if FileManager.default.fileExists(atPath: cfg) { paths.append(cfg) }
+            let inside = (try? FileManager.default.contentsOfDirectory(atPath: c)) ?? []
+            paths += inside.filter { $0.hasSuffix(".gguf") }
+                .map { (c as NSString).appendingPathComponent($0) }
+        }
+        if let cfg = paths.first(where: { $0.hasSuffix("config.json") }),
            let g = fromMLXConfig(path: cfg) {
             return g
         }
-        if let gguf = candidates.first(where: { $0.hasSuffix(".gguf") }),
+        if let gguf = paths.first(where: { $0.hasSuffix(".gguf") }),
            let g = fromGGUF(path: gguf) {
             return g
         }

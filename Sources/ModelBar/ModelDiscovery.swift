@@ -15,6 +15,9 @@ struct DiscoveredItem: Sendable, Identifiable, Equatable {
     var name: String
     var sizeBytes: UInt64
     var detail: String
+    /// Filesystem location, for the two local sources. Nil for ollama and
+    /// ComfyUI, whose inventories are served over HTTP and have no path here.
+    var path: String?
 
     enum Source: String, Sendable { case mlx, gguf, comfyui, ollama }
 }
@@ -106,7 +109,7 @@ enum ModelDiscovery {
                     id: "mlx:\(dir)", source: .mlx,
                     name: dir == repoPath ? repo : "\(repo)/\((dir as NSString).lastPathComponent)",
                     sizeBytes: size,
-                    detail: arch ?? "MLX model"))
+                    detail: arch ?? "MLX model", path: dir))
             }
         }
         return out
@@ -155,7 +158,7 @@ enum ModelDiscovery {
             let name = meta["general.name"] ?? (full as NSString).lastPathComponent
             out.append(DiscoveredItem(
                 id: "gguf:\(full)", source: .gguf, name: name, sizeBytes: size,
-                detail: arch))
+                detail: arch, path: full))
         }
         return out
     }

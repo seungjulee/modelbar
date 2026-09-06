@@ -47,7 +47,7 @@ enum CLI {
         case "start":     return await start(state, id: rest.first)
         case "stop":      return await stop(state, id: rest.first)
         case "harness":   return await harness(state, rest)
-        case "discover":  return await discover(state)
+        case "discover":  return await discover(state, rest)
         case "context":   return context(state, rest)
         default:
             print("""
@@ -59,7 +59,10 @@ enum CLI {
               --cli start <model-id>          stop the port's occupant, start it, await health
               --cli stop  <model-id>          stop the server on that model's port
               --cli context <model-id> <n>    set the context window for the next load
-              --cli discover                  models on disk / in a backend, not in the manifest
+              --cli discover [--add [name]]   models on disk / in a backend, not in the manifest.
+                                              --add writes a draft entry for each (or for the
+                                              ones whose name contains <name>); drafts refuse
+                                              to load until given a start command
               --cli harness show              what every harness currently points at
               --cli harness set <harness> <model-id|api>
                                               point one harness at a model.
@@ -292,18 +295,55 @@ enum CLI {
         return 0
     }
 
-    private static func discover(_ state: AppState) async -> Int32 {
+    private static func discover(_ state: AppState, _ rest: [String]) async -> Int32 {
         await state.refreshDiscovery(force: true)
         if state.discovered.isEmpty {
             print("nothing found outside the manifest")
             return 0
         }
-        print("found \(state.discovered.count) item(s) not referenced by any manifest model:\n")
-        for item in state.discovered {
-            print("  [\(item.source.rawValue)] \(item.name)")
-            print("        \(item.detail)" + (item.sizeBytes > 0 ? " · \(Fmt.bytes(item.sizeBytes))" : ""))
+        let add = rest.contains("--add")
+        let filter = rest.first { $0 != "--add" }
+
+        guard add else {
+            print("found \(state.discovered.count) item(s) not referenced by any manifest model:\n")
+            for item in state.discovered {
+                print("  [\(item.source.rawValue)] \(item.name)")
+                print("        \(item.detail)"
+                      + (item.sizeBytes > 0 ? " · \(Fmt.bytes(item.sizeBytes))" : ""))
+            }
+            print("\nadd them with: --cli discover --add [name-substring]")
+            return 0
         }
-        return 0
+
+        do {
+            let result = try ManifestDraft.add(state.discovered, matching: filter,
+                                               manifestPath: state.manifestPath,
+                                               manifest: state.manifest)
+            for (name, reason) in result.skipped {
+                print("skipped \(name): \(reason)")
+            }
+            guard !result.added.isEmpty else {
+                print("nothing added")
+                return result.skipped.isEmpty ? 0 : 1
+            }
+            if let backup = result.backupPath { print("backup: \(backup)") }
+            print("added \(result.added.count) draft entry(s): "
+                  + result.added.joined(separator: ", "))
+            // Reload so the report below reflects the file as written, not the
+            // in-memory state from before it changed.
+            state.reloadManifest()
+            print("""
+
+                These are drafts: they carry size and context ceiling read from \
+                the model's own metadata, but no start command, and will refuse \
+                to load until one is filled in. Edit \(state.manifestPath), add \
+                start.argv, then remove "draft": true.
+                """)
+            return 0
+        } catch {
+            FileHandle.standardError.write(Data("discover --add failed: \(error)\n".utf8))
+            return 1
+        }
     }
 
     private static func harness(_ state: AppState, _ rest: [String]) async -> Int32 {
